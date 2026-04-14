@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.db
+*.egg-info/
+dist/
+.build/
+.pytest_cache/
+.ruff_cache/
+.ghost/
+
+# Local agent/plugin dirs (skills live in global ~/.claude, ~/.codex, ~/.cursor)
+.claude/
+.codex/
+.cursor/
+
+# Internal design docs / OpenSpec workflow
+openspec/
