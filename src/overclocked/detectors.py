@@ -45,7 +45,7 @@ _CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 _CLAUDE_CLI_COMBINED_PATTERN = r"(^|/)claude(-code)?( |$)|@anthropic-ai/claude-code"
 _CURSOR_PROJECTS_DIR = Path.home() / ".cursor" / "projects"
 _CODEX_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
-_ACTIVITY_WINDOW_SEC = 30 * 60
+_ACTIVITY_WINDOW_SEC = 5 * 60
 _CPU_ACTIVITY_THRESHOLD = 5.0
 
 _cwd_cache: dict[int, str | None] = {}

@@ -23,19 +23,22 @@ _STATS = "#9D887A"  # medium warm grey — more readable in the stats block
 
 _TOOL_SYMBOLS: dict[str, str] = {
     "claude": "terminal",
-    "cursor_editor": "cursorarrow.rays",
-    "cursor_agent": "arrow.triangle.2.circlepath",
+    "cursor": "cursorarrow.rays",
     "codex": "cube",
 }
 
 _TOOL_LABELS: dict[str, str] = {
     "claude": "Claude Code",
-    "cursor_editor": "Cursor (editor)",
-    "cursor_agent": "Cursor (agent)",
+    "cursor": "Cursor",
     "codex": "Codex",
 }
 
-_TOOL_ORDER = ["claude", "cursor_editor", "cursor_agent", "codex"]
+_TOOL_ORDER = ["claude", "cursor", "codex"]
+
+_TOOL_ALIASES: dict[str, str] = {
+    "cursor_editor": "cursor",
+    "cursor_agent": "cursor",
+}
 
 
 # ── SwiftBar param helper ─────────────────────────────────────────────────────
@@ -112,8 +115,13 @@ def dropdown(state: RenderState) -> str:
 
     by_tool: dict[str, list[Session]] = defaultdict(list)
     for s in sessions:
-        by_tool[s.tool].append(s)
-    grouped_projects = _group_sessions_by_project(sessions)
+        by_tool[_TOOL_ALIASES.get(s.tool, s.tool)].append(s)
+
+    aliased = [
+        Session(tool=_TOOL_ALIASES.get(s.tool, s.tool), pid=s.pid, cwd=s.cwd, project=s.project)
+        for s in sessions
+    ]
+    grouped_projects = _group_sessions_by_project(aliased)
 
     lines: list[str] = []
 
