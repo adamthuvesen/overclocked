@@ -39,9 +39,7 @@ Refresh SwiftBar. You should see `🧠 0` in your menu bar.
 
 The plugin runs as a SwiftBar [streamable plugin](https://github.com/swiftbar/SwiftBar#plugin-types): SwiftBar spawns one long-lived `overclocked --stream` process, which emits a fresh menu every 5s. There is no per-tick Python startup, no per-tick SQLite reopen, and no subprocess timeout — SwiftBar restarts the process if it exits. Confirm one process is running with `pgrep -af "overclocked --stream"`.
 
-If you're upgrading from the old `quorum.5s.py` plugin, remove the old plugin entry, install `overclocked.5s.py`, and refresh or relaunch SwiftBar once. SwiftBar tracks menu-bar visibility per plugin filename, so the renamed item may need to be shown again after the rename.
-
-Existing local state under `~/.quorum/` is adopted automatically on first run. `OVERCLOCKED_HOME` is the canonical override env var; `QUORUM_HOME` is still accepted as a legacy fallback.
+`OVERCLOCKED_HOME` overrides the default runtime directory (`~/.overclocked/`).
 
 ### Native fallback
 

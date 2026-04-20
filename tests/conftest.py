@@ -13,7 +13,6 @@ def isolate_overclocked_home(tmp_path, monkeypatch):
     """Redirect all ~/.overclocked access to a temporary directory."""
     overclocked_home = tmp_path / ".overclocked"
     overclocked_home.mkdir()
-    monkeypatch.delenv("QUORUM_HOME", raising=False)
     monkeypatch.setenv("OVERCLOCKED_HOME", str(overclocked_home))
     return overclocked_home
 

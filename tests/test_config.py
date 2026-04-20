@@ -70,11 +70,3 @@ def test_trailing_slash_normalised():
     cfg = Config(redact_paths=["~/clients"])
     home = Path.home()
     assert cfg.is_redacted(str(home / "clients" / "foo"))
-
-
-def test_legacy_quorum_home_env_var_still_loads_config(tmp_path, monkeypatch):
-    monkeypatch.delenv("OVERCLOCKED_HOME", raising=False)
-    monkeypatch.setenv("QUORUM_HOME", str(tmp_path))
-    (tmp_path / "config.toml").write_text('[privacy]\nredact_paths = ["~/legacy/"]\n')
-    cfg = load_config()
-    assert cfg.redact_paths == ["~/legacy/"]
