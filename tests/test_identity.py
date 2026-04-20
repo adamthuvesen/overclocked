@@ -47,7 +47,6 @@ def test_project_label_claude_worktree_uses_repo_name():
     cwd = str(
         Path.home()
         / "dev"
-        / "menti"
         / "my-project"
         / ".claude"
         / "worktrees"
@@ -58,8 +57,8 @@ def test_project_label_claude_worktree_uses_repo_name():
 
 def test_project_label_codex_worktree_uses_repo_name():
     cfg = Config()
-    cwd = str(Path.home() / "dev" / "menti" / "ghost" / ".codex" / "worktrees" / "abc123")
-    assert project_label(cwd, cfg) == "ghost"
+    cwd = str(Path.home() / "dev" / "my-other-project" / ".codex" / "worktrees" / "abc123")
+    assert project_label(cwd, cfg) == "my-other-project"
 
 
 def test_session_key_with_cwd():
