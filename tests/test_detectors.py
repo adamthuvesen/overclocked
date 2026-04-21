@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import time
 from pathlib import Path
@@ -424,6 +425,32 @@ def test_list_codex_app_sessions_detects_desktop(tmp_path, monkeypatch):
     assert sessions[0].tool == "codex"
 
 
+def test_codex_session_meta_found_after_non_meta_preamble(tmp_path, monkeypatch):
+    """session_meta may not be the first jsonl line."""
+    import json
+
+    f = tmp_path / "late-meta.jsonl"
+    f.parent.mkdir(parents=True, exist_ok=True)
+    meta = {
+        "timestamp": "2026-01-01T12:00:00.000Z",
+        "type": "session_meta",
+        "payload": {"originator": "Codex Desktop", "cwd": "/Users/me/proj"},
+    }
+    recent = json.dumps(
+        {"timestamp": _iso_now_z(), "type": "assistant", "payload": {}}
+    )
+    f.write_text(
+        json.dumps({"type": "event", "payload": {}}) + "\n"
+        + json.dumps(meta) + "\n"
+        + recent
+        + "\n"
+    )
+    monkeypatch.setattr("overclocked.detectors._CODEX_SESSIONS_DIR", tmp_path)
+    sessions = list_codex_app_sessions()
+    assert len(sessions) == 1
+    assert sessions[0].cwd == "/Users/me/proj"
+
+
 def test_list_codex_app_sessions_skips_tui(tmp_path, monkeypatch):
     f = tmp_path / "session-tui.jsonl"
     _make_codex_session(f, "/Users/me/proj", originator="codex-tui")
@@ -464,7 +491,13 @@ def test_list_codex_app_sessions_none_cwd_distinct(tmp_path, monkeypatch):
     def _make_no_cwd(path):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
-            json.dumps({"payload": {"originator": "Codex Desktop", "cwd": None}}) + "\n"
+            json.dumps(
+                {
+                    "type": "session_meta",
+                    "payload": {"originator": "Codex Desktop", "cwd": None},
+                }
+            )
+            + "\n"
         )
 
     f1 = tmp_path / "s1.jsonl"
@@ -1042,3 +1075,52 @@ def test_enrich_session_metrics_fills_from_transcript(monkeypatch, tmp_path):
     assert s.model == "claude-3-opus"
     assert s.input_tokens == 3
     assert s.output_tokens == 4
+
+
+def test_enrich_claude_tty_matches_abtop_per_session_transcript(tmp_path, monkeypatch):
+    """TTY sessions in the same cwd must not share one project-dir parse (same token totals)."""
+    import overclocked.detectors as d
+
+    cfg_root = tmp_path / "claude"
+    (cfg_root / "sessions").mkdir(parents=True)
+    (cfg_root / "projects").mkdir(parents=True)
+    cwd = "/Users/me/repo"
+    enc = d._encode_cwd_for_claude_projects(cwd)
+    proj_dir = cfg_root / "projects" / enc
+    proj_dir.mkdir(parents=True)
+
+    (cfg_root / "sessions" / "100.json").write_text(
+        json.dumps({"pid": 100, "sessionId": "sess-a", "cwd": cwd, "startedAt": 1}),
+        encoding="utf-8",
+    )
+    (cfg_root / "sessions" / "200.json").write_text(
+        json.dumps({"pid": 200, "sessionId": "sess-b", "cwd": cwd, "startedAt": 1}),
+        encoding="utf-8",
+    )
+
+    def assistant_line(inp: int) -> str:
+        return json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "model": "claude-sonnet-4",
+                    "usage": {
+                        "input_tokens": inp,
+                        "output_tokens": 1,
+                        "cache_read_input_tokens": 0,
+                        "cache_creation_input_tokens": 0,
+                    },
+                },
+            }
+        )
+
+    (proj_dir / "sess-a.jsonl").write_text(assistant_line(10) + "\n", encoding="utf-8")
+    (proj_dir / "sess-b.jsonl").write_text(assistant_line(5000) + "\n", encoding="utf-8")
+
+    monkeypatch.setattr(d, "_claude_config_base", lambda: cfg_root)
+
+    a = Session(tool="claude", pid=100, cwd=cwd, project="repo")
+    b = Session(tool="claude", pid=200, cwd=cwd, project="repo")
+    d._enrich_session_metrics([a, b], Config())
+    assert a.input_tokens == 10
+    assert b.input_tokens == 5000

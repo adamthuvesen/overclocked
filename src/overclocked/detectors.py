@@ -23,6 +23,8 @@ class Session:
     pid: int
     cwd: str | None = None
     project: str | None = None
+    #: True when ``pid`` is derived from a path hash (not an OS PID — do not use lsof).
+    synthetic: bool = False
     #: ``working`` | ``waiting`` | ``done`` (abtop-style); ``None`` when unknown
     status: str | None = None
     model: str | None = None
@@ -535,6 +537,97 @@ def _claude_project_dir_for_cwd(cwd: str) -> Path | None:
     return None
 
 
+def _claude_config_base() -> Path:
+    """Claude Code config root (``~/.claude`` or ``CLAUDE_CONFIG_DIR``)."""
+    override = os.environ.get("CLAUDE_CONFIG_DIR")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".claude"
+
+
+def _encode_cwd_for_claude_projects(cwd: str) -> str:
+    """Match Claude Code project dir naming (same as abtop ``encode_cwd_path``)."""
+    return "".join("-" if c in "/_." else c for c in cwd)
+
+
+def _is_symlink(path: Path) -> bool:
+    try:
+        return path.is_symlink()
+    except OSError:
+        return True
+
+
+def _find_claude_session_file_for_pid(sessions_dir: Path, pid: int) -> Path | None:
+    """Resolve ``sessions/<pid>.json`` or any ``*.json`` whose ``pid`` field matches."""
+    direct = sessions_dir / f"{pid}.json"
+    if direct.is_file() and not _is_symlink(direct):
+        return direct
+    try:
+        for path in sessions_dir.glob("*.json"):
+            if _is_symlink(path):
+                continue
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(data, dict) and data.get("pid") == pid:
+                return path
+    except OSError:
+        return None
+    return None
+
+
+def _claude_session_meta_from_session_file(path: Path) -> tuple[str | None, str | None]:
+    """Return ``(session_id, cwd)`` from a Claude Code ``sessions/*.json`` file."""
+    try:
+        data: object = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None, None
+    if not isinstance(data, dict):
+        return None, None
+    sid = data.get("sessionId") or data.get("session_id")
+    cwd = data.get("cwd")
+    sid_s = sid.strip() if isinstance(sid, str) and sid.strip() else None
+    cwd_s = cwd if isinstance(cwd, str) else None
+    return sid_s, cwd_s
+
+
+def _find_claude_transcript_jsonl_for_tty(pid: int, cwd: str) -> Path | None:
+    """Resolve per-session transcript: ``projects/<encode(cwd)>/<sessionId>.jsonl``."""
+    base = _claude_config_base()
+    sessions_dir = base / "sessions"
+    if not sessions_dir.is_dir():
+        return None
+    session_json = _find_claude_session_file_for_pid(sessions_dir, pid)
+    if session_json is None:
+        return None
+    session_id, file_cwd = _claude_session_meta_from_session_file(session_json)
+    if not session_id:
+        return None
+    if file_cwd is not None:
+        n_file = _normalise_cwd(file_cwd)
+        n_sess = _normalise_cwd(cwd)
+        if n_file is not None and n_sess is not None and n_file != n_sess:
+            return None
+    projects = base / "projects"
+    if not projects.is_dir():
+        return None
+    enc = _encode_cwd_for_claude_projects(cwd)
+    direct = projects / enc / f"{session_id}.jsonl"
+    if direct.is_file() and not _is_symlink(direct):
+        return direct
+    try:
+        for entry in projects.iterdir():
+            if not entry.is_dir() or _is_symlink(entry):
+                continue
+            cand = entry / f"{session_id}.jsonl"
+            if cand.is_file() and not _is_symlink(cand):
+                return cand
+    except OSError:
+        pass
+    return None
+
+
 def _resolve_cwd_cached(pid: int) -> str | None:
     """Resolve cwd for pid, cached for the current tick (cache cleared each tick)."""
     if pid not in _cwd_cache:
@@ -567,16 +660,15 @@ def _ensure_codex_tick_data() -> CodexTickData:
         return _codex_tick_data
     now = time.time()
     active_cutoff = now - _ACTIVITY_WINDOW_SEC
-    scan_cutoff = now - 3600
+    scan_cutoff = now - 86400  # 24h — desktop rows rely on transcript for freshness
     cli_cwds: set[str] = set()
     cli_rollout_by_cwd: dict[str, Path] = {}
     desktop_rows: list[tuple[Path, float, str | None]] = []
     if _CODEX_SESSIONS_DIR.exists():
         for path, mtime in _jsonl_files_with_mtime(_CODEX_SESSIONS_DIR, scan_cutoff):
             originator, meta_cwd = _codex_session_meta(path)
-            if originator == "Codex Desktop":
-                if mtime >= active_cutoff:
-                    desktop_rows.append((path, mtime, meta_cwd))
+            if _is_codex_desktop_originator(originator):
+                desktop_rows.append((path, mtime, meta_cwd))
             elif mtime >= active_cutoff:
                 if not jsonl_transcript_recent(
                     path,
@@ -739,16 +831,39 @@ def codex_app_session_is_active(session_file: Path) -> bool:
     )
 
 
+_CODEX_META_SCAN_BYTES = 65536
+
+
+def _is_codex_desktop_originator(originator: str | None) -> bool:
+    if not isinstance(originator, str):
+        return False
+    return originator.strip().casefold() == "codex desktop"
+
+
 def _codex_session_meta(session_file: Path) -> tuple[str | None, str | None]:
-    """Return (originator, cwd) from the first line of a Codex session jsonl."""
+    """Return (originator, cwd) from a session_meta line in the file prefix (not only line 1)."""
     try:
         with open(session_file, errors="replace") as f:
-            first = f.readline()
-        d = json.loads(first)
-        payload = d.get("payload", {})
-        return payload.get("originator"), payload.get("cwd")
-    except (OSError, json.JSONDecodeError, KeyError):
+            head = f.read(_CODEX_META_SCAN_BYTES)
+    except OSError:
         return None, None
+    for line in head.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            d = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(d, dict):
+            continue
+        if d.get("type") != "session_meta":
+            continue
+        payload = d.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        return payload.get("originator"), payload.get("cwd")
+    return None, None
 
 
 def _normalise_cwd(cwd: str | None) -> str | None:
@@ -824,6 +939,7 @@ def list_claude_app_sessions() -> list[Session]:
                 cwd=cwd,
                 status=_claude_desktop_session_status(session_file),
                 transcript_path=session_file,
+                synthetic=True,
             ),
         )
     return sessions
@@ -933,6 +1049,7 @@ def list_cursor_editor_windows() -> list[Session]:
                 pid=_synthetic_pid(project_dir),
                 cwd=cwd,
                 status=_cursor_coarse_status(project_dir),
+                synthetic=True,
             ),
         )
     return sessions
@@ -961,6 +1078,7 @@ def list_cursor_agent_sessions() -> list[Session]:
                 pid=pid,
                 cwd=cwd,
                 status=_cursor_coarse_status(project_dir),
+                synthetic=True,
             ),
         )
     return sessions
@@ -1030,7 +1148,14 @@ def list_codex_app_sessions() -> list[Session]:
         pid = _synthetic_pid(path)
         st = _codex_app_file_session_status(path)
         sessions.append(
-            Session(tool="codex", pid=pid, cwd=cwd, status=st, transcript_path=path),
+            Session(
+                tool="codex",
+                pid=pid,
+                cwd=cwd,
+                status=st,
+                transcript_path=path,
+                synthetic=True,
+            ),
         )
     return sessions
 
@@ -1058,9 +1183,13 @@ def _enrich_session_metrics(sessions: list[Session], config: Config) -> None:
             if s.transcript_path is not None:
                 snap = parse_claude_jsonl_tail(s.transcript_path)
             elif s.cwd is not None:
-                proj = _claude_project_dir_for_cwd(s.cwd)
-                if proj is not None:
-                    snap = parse_claude_project_dir(proj)
+                tty_path = _find_claude_transcript_jsonl_for_tty(s.pid, s.cwd)
+                if tty_path is not None:
+                    snap = parse_claude_jsonl_tail(tty_path)
+                else:
+                    proj = _claude_project_dir_for_cwd(s.cwd)
+                    if proj is not None:
+                        snap = parse_claude_project_dir(proj)
         elif s.tool == "codex":
             if s.transcript_path is not None:
                 snap = parse_codex_rollout_tail(s.transcript_path)
@@ -1108,7 +1237,7 @@ class Sampler:
         _begin_tick()
         raw = list_all_sessions()
         # Synthetic session PIDs are fake; skip lsof batch for them.
-        pids_needing = sorted({s.pid for s in raw if s.cwd is None and s.pid < 100_000})
+        pids_needing = sorted({s.pid for s in raw if s.cwd is None and not s.synthetic})
         if pids_needing:
             for pid, cwd in resolve_cwds_batch(pids_needing).items():
                 _cwd_cache[pid] = cwd
