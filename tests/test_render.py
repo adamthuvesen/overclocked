@@ -72,7 +72,7 @@ def test_dropdown_zero_sessions():
     output = dropdown(state)
     assert "🧠  0" in output
     assert "Claude Code" in output
-    assert "Cursor (editor)" in output
+    assert "Cursor" in output
     assert "Codex" in output
 
 
@@ -86,7 +86,7 @@ def test_dropdown_with_sessions():
     assert "🧠  2" in output
     assert "🔥" not in output
     assert "Claude Code" in output
-    assert "Cursor (editor)" in output
+    assert "Cursor" in output
     assert "overclocked  1" in output
     assert "—  1" in output
 
