@@ -135,6 +135,29 @@ def test_session_row_has_no_hot_suffix():
     assert "· hot" not in output
 
 
+def test_dropdown_shows_status_suffix():
+    sessions = [
+        Session(
+            tool="claude",
+            pid=1,
+            cwd="/dev/overclocked",
+            project="overclocked",
+            status="working",
+        ),
+    ]
+    output = dropdown(RenderState(sessions=sessions))
+    assert "· working" in output
+
+
+def test_dropdown_mixed_status_ellipsis():
+    sessions = [
+        Session(tool="claude", pid=1, cwd="/dev/x", project="x", status="working"),
+        Session(tool="claude", pid=2, cwd="/dev/x", project="x", status="waiting"),
+    ]
+    output = dropdown(RenderState(sessions=sessions))
+    assert "· …" in output
+
+
 def test_dropdown_groups_same_project_into_single_summary_row():
     sessions = [
         Session(tool="claude", pid=1, cwd="/dev/almanac", project="almanac"),

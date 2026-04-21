@@ -8,6 +8,8 @@ from pathlib import Path
 
 from overclocked.config import Config
 from overclocked.detectors import (
+    CodexTickData,
+    PsRow,
     Sampler,
     Session,
     _claude_pgrep_all,
@@ -17,6 +19,7 @@ from overclocked.detectors import (
     codex_app_session_is_active,
     cpu_is_active,
     cursor_agent_session_is_active,
+    has_active_descendant,
     is_descendant_of,
     list_claude_app_sessions,
     list_claude_sessions,
@@ -866,3 +869,103 @@ def test_sampler_stable_addition(monkeypatch):
     k2 = Sampler.raw_session_keys(s.raw_sessions())
     s.tick()
     assert len(stable_sessions_from_keys(s.raw_sessions(), k2)) == 1
+
+
+# ── session status (abtop-style) ──────────────────────────────────────────────
+
+
+def test_has_active_descendant_detects_hot_child(monkeypatch):
+    import overclocked.detectors as d
+
+    monkeypatch.setattr(
+        d,
+        "_ps_table",
+        {
+            100: PsRow(ppid=1, tty="?", pcpu=0.0, command="parent"),
+            101: PsRow(ppid=100, tty="?", pcpu=6.0, command="child"),
+        },
+    )
+    assert has_active_descendant(100, 5.0) is True
+
+
+def test_has_active_descendant_respects_threshold(monkeypatch):
+    import overclocked.detectors as d
+
+    monkeypatch.setattr(
+        d,
+        "_ps_table",
+        {
+            100: PsRow(ppid=1, tty="?", pcpu=0.0, command="parent"),
+            101: PsRow(ppid=100, tty="?", pcpu=2.0, command="child"),
+        },
+    )
+    assert has_active_descendant(100, 5.0) is False
+
+
+def test_working_or_waiting_recency(monkeypatch):
+    import overclocked.detectors as d
+
+    monkeypatch.setattr(d, "_cpu_percent", lambda pid: 0.0)
+    monkeypatch.setattr(d, "has_active_descendant", lambda pid, t: False)
+    assert d._working_or_waiting_from_signals(1, 100.0, now=120.0) == "working"
+    assert d._working_or_waiting_from_signals(1, 10.0, now=120.0) == "waiting"
+
+
+def test_working_or_waiting_parent_cpu(monkeypatch):
+    import overclocked.detectors as d
+
+    monkeypatch.setattr(d, "_cpu_percent", lambda pid: 2.0)
+    monkeypatch.setattr(d, "has_active_descendant", lambda pid, t: False)
+    assert d._working_or_waiting_from_signals(7, None, now=1000.0) == "working"
+
+
+def test_codex_cli_status_exec_done(monkeypatch, tmp_path):
+    import overclocked.detectors as d
+
+    rollout = tmp_path / "rollout-1.jsonl"
+    rollout.write_text(
+        '{"type":"event_msg","timestamp":"2026-01-01T00:00:00Z",'
+        '"payload":{"type":"task_complete"}}\n'
+    )
+    data = CodexTickData(
+        frozenset({"/Users/me/proj"}),
+        {"/Users/me/proj": rollout},
+        [],
+    )
+    monkeypatch.setattr(d, "_ensure_codex_tick_data", lambda: data)
+    monkeypatch.setattr(d, "_cpu_percent", lambda pid: 0.0)
+    monkeypatch.setattr(d, "has_active_descendant", lambda pid, t: False)
+    assert d._codex_cli_session_status(42, "/Users/me/proj", "/usr/bin/codex exec x") == "done"
+
+
+def test_codex_cli_status_waiting_stale_transcript(monkeypatch, tmp_path):
+    import overclocked.detectors as d
+
+    rollout = tmp_path / "rollout-2.jsonl"
+    rollout.write_text(
+        '{"type":"session_meta","timestamp":"2020-01-01T00:00:00Z","payload":'
+        '{"id":"s","cwd":"/Users/me/p"}}\n'
+    )
+    data = CodexTickData(
+        frozenset({"/Users/me/p"}),
+        {"/Users/me/p": rollout},
+        [],
+    )
+    monkeypatch.setattr(d, "_ensure_codex_tick_data", lambda: data)
+    monkeypatch.setattr(d, "_cpu_percent", lambda pid: 0.0)
+    monkeypatch.setattr(d, "has_active_descendant", lambda pid, t: False)
+    assert d._codex_cli_session_status(43, "/Users/me/p", "codex") == "waiting"
+
+
+def test_cursor_coarse_status_recent_terminal(tmp_path):
+    import os
+
+    import overclocked.detectors as d
+
+    proj = tmp_path / "Users-me-dev-proj"
+    (proj / "terminals").mkdir(parents=True)
+    t = proj / "terminals" / "1.txt"
+    t.write_text("---\ncwd: /Users/me/dev/proj\n---\n")
+    now = time.time()
+    os.utime(t, (now, now))
+    assert d._cursor_coarse_status(proj) == "working"

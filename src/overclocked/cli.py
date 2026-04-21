@@ -31,6 +31,7 @@ def _build_state_dict(sessions):
                 "pid": s.pid,
                 "cwd": s.cwd,
                 "project": s.project,
+                "status": s.status,
             }
             for s in sessions
         ],

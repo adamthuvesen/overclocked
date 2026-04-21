@@ -106,6 +106,24 @@ def _group_sessions_by_project(sessions: list[Session]) -> dict[str, list[tuple[
     return ordered
 
 
+def _project_status_suffix(sessions: list[Session], tool: str, project_name: str) -> str:
+    """Compact status tag when all rows share one abtop-style status, else ellipsis."""
+    statuses: list[str] = []
+    for s in sessions:
+        if _TOOL_ALIASES.get(s.tool, s.tool) != tool:
+            continue
+        if (s.project or "—") != project_name:
+            continue
+        if s.status:
+            statuses.append(s.status)
+    if not statuses:
+        return ""
+    uniq = sorted(set(statuses))
+    if len(uniq) == 1:
+        return f" · {_swiftbar_safe(uniq[0])}"
+    return " · …"
+
+
 def dropdown(state: RenderState) -> str:
     """Return the full SwiftBar dropdown text (menu bar line + dropdown body)."""
     sessions = state.sessions
@@ -118,7 +136,13 @@ def dropdown(state: RenderState) -> str:
         by_tool[_TOOL_ALIASES.get(s.tool, s.tool)].append(s)
 
     aliased = [
-        Session(tool=_TOOL_ALIASES.get(s.tool, s.tool), pid=s.pid, cwd=s.cwd, project=s.project)
+        Session(
+            tool=_TOOL_ALIASES.get(s.tool, s.tool),
+            pid=s.pid,
+            cwd=s.cwd,
+            project=s.project,
+            status=s.status,
+        )
         for s in sessions
     ]
     grouped_projects = _group_sessions_by_project(aliased)
@@ -142,8 +166,9 @@ def dropdown(state: RenderState) -> str:
 
             for project_name, project_count in grouped_projects.get(tool, []):
                 project = _swiftbar_safe(project_name)
+                st = _project_status_suffix(sessions, tool, project_name)
                 params = _p(color=_ACTIVE, size=12, trim="false")
-                lines.append(f"  {project}  {project_count}{params}")
+                lines.append(f"  {project}  {project_count}{st}{params}")
         else:
             params = _p(color=_DIM, size=11)
             lines.append(f"{label}  0{params}")

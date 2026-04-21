@@ -22,6 +22,8 @@ class Session:
     pid: int
     cwd: str | None = None
     project: str | None = None
+    #: ``working`` | ``waiting`` | ``done`` (abtop-style); ``None`` when unknown
+    status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -35,6 +37,8 @@ class PsRow:
 @dataclass(frozen=True)
 class CodexTickData:
     cli_active_cwds: frozenset[str]
+    #: Normalised cwd → rollout jsonl path (newest mtime wins per cwd)
+    cli_rollout_by_cwd: dict[str, Path]
     desktop_rows: list[tuple[Path, float, str | None]]
 
 
@@ -48,6 +52,10 @@ _CURSOR_PROJECTS_DIR = Path.home() / ".cursor" / "projects"
 _CODEX_SESSIONS_DIR = Path.home() / ".codex" / "sessions"
 _ACTIVITY_WINDOW_SEC = 5 * 60
 _CPU_ACTIVITY_THRESHOLD = 5.0
+# abtop-style session status (transcript recency + CPU + tool children)
+_STATUS_RECENCY_SEC = 30
+_STATUS_PARENT_CPU_PCT = 1.0
+_STATUS_DESCENDANT_CPU_PCT = 5.0
 
 _cwd_cache: dict[int, str | None] = {}
 _mtime_cache: dict[str, float] = {}
@@ -193,6 +201,202 @@ def is_descendant_of(pid: int, names: list[str]) -> bool:
             break
         current = parent
     return False
+
+
+def _children_by_parent_from_ps() -> dict[int, list[int]]:
+    """Map ppid → child pids from the current ``_ps_table`` snapshot."""
+    if not _ps_table:
+        return {}
+    children: dict[int, list[int]] = {}
+    for pid, row in _ps_table.items():
+        children.setdefault(row.ppid, []).append(pid)
+    return children
+
+
+def has_active_descendant(root_pid: int, cpu_threshold: float) -> bool:
+    """True if any descendant of ``root_pid`` exceeds ``cpu_threshold`` %CPU."""
+    if not _ps_table:
+        return False
+    children_by_parent = _children_by_parent_from_ps()
+    stack = list(children_by_parent.get(root_pid, []))
+    visited: set[int] = set()
+    while stack:
+        cpid = stack.pop()
+        if cpid in visited:
+            continue
+        visited.add(cpid)
+        row = _ps_table.get(cpid)
+        if row is not None and row.pcpu > cpu_threshold:
+            return True
+        stack.extend(children_by_parent.get(cpid, []))
+    return False
+
+
+def _working_or_waiting_from_signals(
+    pid: int,
+    last_activity_unix: float | None,
+    *,
+    now: float | None = None,
+) -> str:
+    """abtop-style Working vs Waiting from transcript age and CPU (live PID)."""
+    t = time.time() if now is None else now
+    if last_activity_unix is not None and (t - last_activity_unix) < _STATUS_RECENCY_SEC:
+        return "working"
+    if _cpu_percent(pid) > _STATUS_PARENT_CPU_PCT:
+        return "working"
+    if has_active_descendant(pid, _STATUS_DESCENDANT_CPU_PCT):
+        return "working"
+    return "waiting"
+
+
+def _claude_project_dir_max_transcript_unix(proj: Path) -> float | None:
+    """Latest JSONL transcript timestamp under a Claude Code project dir."""
+    max_u: float | None = None
+    candidates: list[Path] = []
+    conv = proj / "conversation.jsonl"
+    try:
+        if conv.is_file():
+            candidates.append(conv)
+        for p in proj.rglob("agent-*.jsonl"):
+            try:
+                if p.is_file():
+                    candidates.append(p)
+            except OSError:
+                pass
+    except OSError:
+        pass
+    for p in candidates[:64]:
+        r = jsonl_tail_timestamp_result(p, use_payload_timestamp=False)
+        if r.max_unix is not None and (max_u is None or r.max_unix > max_u):
+            max_u = r.max_unix
+    return max_u
+
+
+def _claude_tty_session_status(pid: int, cwd: str | None) -> str | None:
+    if cwd is None:
+        return None
+    proj = _claude_project_dir_for_cwd(cwd)
+    if proj is None:
+        return None
+    last = _claude_project_dir_max_transcript_unix(proj)
+    return _working_or_waiting_from_signals(pid, last)
+
+
+def _claude_desktop_session_status(session_file: Path) -> str | None:
+    """Desktop session without a reliable agent PID — transcript age only."""
+    r = jsonl_tail_timestamp_result(session_file, use_payload_timestamp=False)
+    last = r.max_unix
+    if last is None:
+        return None
+    now = time.time()
+    if now - last < _STATUS_RECENCY_SEC:
+        return "working"
+    return "waiting"
+
+
+def _codex_exec_indicates_complete(path: Path) -> bool:
+    """True if rollout JSONL ends with a ``task_complete`` event (``codex exec``)."""
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return False
+    if size == 0:
+        return False
+    tail_bytes = min(size, 98304)
+    try:
+        with path.open("rb") as f:
+            f.seek(max(0, size - tail_bytes))
+            raw = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return False
+    lines = raw.splitlines()
+    if size > tail_bytes and lines:
+        lines = lines[1:]
+    for line in reversed(lines[-400:]):
+        line = line.strip()
+        if not line or "task_complete" not in line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        if obj.get("type") != "event_msg":
+            continue
+        payload = obj.get("payload")
+        if isinstance(payload, dict) and payload.get("type") == "task_complete":
+            return True
+    return False
+
+
+def _codex_app_file_session_status(session_file: Path) -> str | None:
+    """Codex Desktop rollout file — transcript age only (no agent PID for CPU)."""
+    r = jsonl_tail_timestamp_result(session_file, use_payload_timestamp=True)
+    last = r.max_unix
+    if last is None:
+        return None
+    now = time.time()
+    if now - last < _STATUS_RECENCY_SEC:
+        return "working"
+    return "waiting"
+
+
+def _codex_cli_session_status(pid: int, cwd: str | None, argv: str) -> str | None:
+    data = _ensure_codex_tick_data()
+    nc = _normalise_cwd(cwd)
+    path = data.cli_rollout_by_cwd.get(nc) if nc else None
+    last: float | None = None
+    if path is not None:
+        r = jsonl_tail_timestamp_result(path, use_payload_timestamp=True)
+        last = r.max_unix
+    if " exec" in argv and path is not None and _codex_exec_indicates_complete(path):
+        return "done"
+    return _working_or_waiting_from_signals(pid, last)
+
+
+def _cursor_workspace_coarse_status_unix(project_dir: Path) -> float | None:
+    """Best-effort activity instant: agent jsonl timestamps and terminal file mtimes."""
+    max_u: float | None = None
+    tx = project_dir / "agent-transcripts"
+    if tx.is_dir():
+        try:
+            for p in tx.rglob("*.jsonl"):
+                try:
+                    if not p.is_file():
+                        continue
+                    r = jsonl_tail_timestamp_result(p, use_payload_timestamp=False)
+                    if r.max_unix is not None and (max_u is None or r.max_unix > max_u):
+                        max_u = r.max_unix
+                except OSError:
+                    pass
+        except OSError:
+            pass
+    terminals = project_dir / "terminals"
+    if terminals.is_dir():
+        try:
+            with os.scandir(terminals) as it:
+                for entry in it:
+                    if not entry.name.endswith(".txt"):
+                        continue
+                    try:
+                        mt = entry.stat(follow_symlinks=False).st_mtime
+                        if max_u is None or mt > max_u:
+                            max_u = mt
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+    return max_u
+
+
+def _cursor_coarse_status(project_dir: Path) -> str | None:
+    last = _cursor_workspace_coarse_status_unix(project_dir)
+    if last is None:
+        return None
+    if time.time() - last < _STATUS_RECENCY_SEC:
+        return "working"
+    return "waiting"
 
 
 @lru_cache(maxsize=512)
@@ -357,6 +561,7 @@ def _ensure_codex_tick_data() -> CodexTickData:
     active_cutoff = now - _ACTIVITY_WINDOW_SEC
     scan_cutoff = now - 3600
     cli_cwds: set[str] = set()
+    cli_rollout_by_cwd: dict[str, Path] = {}
     desktop_rows: list[tuple[Path, float, str | None]] = []
     if _CODEX_SESSIONS_DIR.exists():
         for path, mtime in _jsonl_files_with_mtime(_CODEX_SESSIONS_DIR, scan_cutoff):
@@ -374,9 +579,19 @@ def _ensure_codex_tick_data() -> CodexTickData:
                 nc = _normalise_cwd(meta_cwd)
                 if nc:
                     cli_cwds.add(nc)
+                    prev = cli_rollout_by_cwd.get(nc)
+                    if prev is None:
+                        cli_rollout_by_cwd[nc] = path
+                    else:
+                        try:
+                            if mtime >= prev.stat().st_mtime:
+                                cli_rollout_by_cwd[nc] = path
+                        except OSError:
+                            cli_rollout_by_cwd[nc] = path
     desktop_rows.sort(key=lambda x: x[1], reverse=True)
     _codex_tick_data = CodexTickData(
         cli_active_cwds=frozenset(cli_cwds),
+        cli_rollout_by_cwd=cli_rollout_by_cwd,
         desktop_rows=desktop_rows,
     )
     return _codex_tick_data
@@ -594,7 +809,14 @@ def list_claude_app_sessions() -> list[Session]:
             use_payload_timestamp=False,
         ):
             continue
-        sessions.append(Session(tool="claude", pid=_synthetic_pid(session_file), cwd=cwd))
+        sessions.append(
+            Session(
+                tool="claude",
+                pid=_synthetic_pid(session_file),
+                cwd=cwd,
+                status=_claude_desktop_session_status(session_file),
+            ),
+        )
     return sessions
 
 
@@ -618,7 +840,8 @@ def _merge_claude_tty_with_desktop(
         n = _normalise_cwd(cwd)
         if n is not None and n in desktop_norm:
             continue
-        kept_tty.append(Session(tool="claude", pid=s.pid, cwd=cwd))
+        st = _claude_tty_session_status(s.pid, cwd)
+        kept_tty.append(Session(tool="claude", pid=s.pid, cwd=cwd, status=st))
     return list(app_sessions) + kept_tty
 
 
@@ -696,7 +919,12 @@ def list_cursor_editor_windows() -> list[Session]:
             continue
         seen_norm.add(norm)
         sessions.append(
-            Session(tool="cursor_editor", pid=_synthetic_pid(project_dir), cwd=cwd),
+            Session(
+                tool="cursor_editor",
+                pid=_synthetic_pid(project_dir),
+                cwd=cwd,
+                status=_cursor_coarse_status(project_dir),
+            ),
         )
     return sessions
 
@@ -718,7 +946,14 @@ def list_cursor_agent_sessions() -> list[Session]:
         if cwd is None:
             continue
         pid = _synthetic_pid(project_dir)
-        sessions.append(Session(tool="cursor_agent", pid=pid, cwd=cwd))
+        sessions.append(
+            Session(
+                tool="cursor_agent",
+                pid=pid,
+                cwd=cwd,
+                status=_cursor_coarse_status(project_dir),
+            ),
+        )
     return sessions
 
 
@@ -756,7 +991,15 @@ def list_codex_sessions() -> list[Session]:
             continue
         if not codex_cli_session_is_active(pid):
             continue
-        sessions.append(Session(tool="codex", pid=pid, cwd=_resolve_cwd_cached(pid)))
+        cwd = _resolve_cwd_cached(pid)
+        sessions.append(
+            Session(
+                tool="codex",
+                pid=pid,
+                cwd=cwd,
+                status=_codex_cli_session_status(pid, cwd, argv),
+            ),
+        )
     return _dedupe_codex_cli_sessions(sessions)
 
 
@@ -776,7 +1019,8 @@ def list_codex_app_sessions() -> list[Session]:
         if not codex_app_session_is_active(path):
             continue
         pid = _synthetic_pid(path)
-        sessions.append(Session(tool="codex", pid=pid, cwd=cwd))
+        st = _codex_app_file_session_status(path)
+        sessions.append(Session(tool="codex", pid=pid, cwd=cwd, status=st))
     return sessions
 
 
