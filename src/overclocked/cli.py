@@ -24,19 +24,27 @@ from overclocked.storage import connect, prune, reconcile, write_snapshot
 
 def _build_state_dict(sessions):
     """Build a JSON-serialisable state dict for --dump-state."""
-    return {
-        "sessions": [
-            {
-                "tool": s.tool,
-                "pid": s.pid,
-                "cwd": s.cwd,
-                "project": s.project,
-                "status": s.status,
-            }
-            for s in sessions
-        ],
-        "active": len(sessions),
-    }
+    rows = []
+    for s in sessions:
+        row = {
+            "tool": s.tool,
+            "pid": s.pid,
+            "cwd": s.cwd,
+            "project": s.project,
+            "status": s.status,
+        }
+        if s.model is not None:
+            row["model"] = s.model
+        if s.input_tokens is not None:
+            row["input_tokens"] = s.input_tokens
+        if s.output_tokens is not None:
+            row["output_tokens"] = s.output_tokens
+        if s.cache_read is not None:
+            row["cache_read"] = s.cache_read
+        if s.cache_create is not None:
+            row["cache_create"] = s.cache_create
+        rows.append(row)
+    return {"sessions": rows, "active": len(sessions)}
 
 
 def _render_once(
@@ -67,7 +75,7 @@ def _render_once(
     write_snapshot(conn, active=active, by_tool=by_tool)
     reconcile(conn, sessions)
 
-    state = RenderState(sessions=sessions, conn=conn)
+    state = RenderState(sessions=sessions, conn=conn, config=config)
     return dropdown(state), k_curr, sessions
 
 
@@ -117,7 +125,7 @@ def _run_once(config: Config) -> None:
         write_snapshot(conn, active=active, by_tool=by_tool)
         reconcile(conn, sessions)
 
-        state = RenderState(sessions=sessions, conn=conn)
+        state = RenderState(sessions=sessions, conn=conn, config=config)
         print(dropdown(state))
 
 

@@ -158,6 +158,82 @@ def test_dropdown_mixed_status_ellipsis():
     assert "· …" in output
 
 
+def test_dropdown_shows_metrics_suffix():
+    sessions = [
+        Session(
+            tool="claude",
+            pid=1,
+            cwd="/dev/x",
+            project="x",
+            model="claude-sonnet-4-20250514",
+            input_tokens=1500,
+            output_tokens=200,
+        ),
+    ]
+    output = dropdown(RenderState(sessions=sessions, config=Config(session_metrics=True)))
+    assert "1.7k tok" in output or "tok" in output
+    assert "claude-sonnet-4-20250514" in output or "claude-sonnet-4-202505" in output
+
+
+def test_dropdown_session_metrics_false_hides_suffix():
+    sessions = [
+        Session(
+            tool="claude",
+            pid=1,
+            cwd="/dev/x",
+            project="x",
+            model="unique-model-xyz-991",
+            input_tokens=99999,
+            output_tokens=1,
+        ),
+    ]
+    output = dropdown(RenderState(sessions=sessions, config=Config(session_metrics=False)))
+    assert "tok" not in output
+    assert "unique-model-xyz" not in output
+    assert "100k" not in output
+
+
+def test_dropdown_cursor_rows_ignore_metric_fields():
+    sessions = [
+        Session(
+            tool="cursor_editor",
+            pid=1,
+            cwd="/dev/w",
+            project="w",
+            model="should-not-appear",
+            input_tokens=50000,
+        ),
+    ]
+    output = dropdown(RenderState(sessions=sessions, config=Config(session_metrics=True)))
+    assert "should-not-appear" not in output
+    assert "50k" not in output and "50000" not in output
+
+
+def test_dropdown_mixed_models_show_ellipsis_in_metrics():
+    sessions = [
+        Session(
+            tool="codex",
+            pid=1,
+            cwd="/dev/x",
+            project="x",
+            model="gpt-a",
+            input_tokens=100,
+            output_tokens=0,
+        ),
+        Session(
+            tool="codex",
+            pid=2,
+            cwd="/dev/x",
+            project="x",
+            model="gpt-b",
+            input_tokens=200,
+            output_tokens=0,
+        ),
+    ]
+    output = dropdown(RenderState(sessions=sessions, config=Config(session_metrics=True)))
+    assert "· … ·" in output or "· …" in output
+
+
 def test_dropdown_groups_same_project_into_single_summary_row():
     sessions = [
         Session(tool="claude", pid=1, cwd="/dev/almanac", project="almanac"),

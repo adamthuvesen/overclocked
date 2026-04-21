@@ -13,6 +13,7 @@ from pathlib import Path
 from overclocked._subprocess import _safe_check_output
 from overclocked.config import Config
 from overclocked.identity import project_label, resolve_cwd, resolve_cwds_batch
+from overclocked.transcript_metrics import parse_claude_jsonl_tail, parse_claude_project_dir, parse_codex_rollout_tail
 from overclocked.transcript_time import jsonl_tail_timestamp_result, jsonl_transcript_recent
 
 
@@ -24,6 +25,13 @@ class Session:
     project: str | None = None
     #: ``working`` | ``waiting`` | ``done`` (abtop-style); ``None`` when unknown
     status: str | None = None
+    model: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_read: int | None = None
+    cache_create: int | None = None
+    #: Desktop / file-backed session jsonl for metrics (Claude desktop, Codex desktop)
+    transcript_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -815,6 +823,7 @@ def list_claude_app_sessions() -> list[Session]:
                 pid=_synthetic_pid(session_file),
                 cwd=cwd,
                 status=_claude_desktop_session_status(session_file),
+                transcript_path=session_file,
             ),
         )
     return sessions
@@ -1020,8 +1029,53 @@ def list_codex_app_sessions() -> list[Session]:
             continue
         pid = _synthetic_pid(path)
         st = _codex_app_file_session_status(path)
-        sessions.append(Session(tool="codex", pid=pid, cwd=cwd, status=st))
+        sessions.append(
+            Session(tool="codex", pid=pid, cwd=cwd, status=st, transcript_path=path),
+        )
     return sessions
+
+
+def _clear_session_metrics(s: Session) -> None:
+    s.model = None
+    s.input_tokens = None
+    s.output_tokens = None
+    s.cache_read = None
+    s.cache_create = None
+
+
+def _enrich_session_metrics(sessions: list[Session], config: Config) -> None:
+    if not config.session_metrics:
+        return
+    data = _ensure_codex_tick_data()
+    for s in sessions:
+        if s.tool in ("cursor_editor", "cursor_agent"):
+            continue
+        if config.is_redacted(s.cwd) or s.project == "redacted":
+            _clear_session_metrics(s)
+            continue
+        snap = None
+        if s.tool == "claude":
+            if s.transcript_path is not None:
+                snap = parse_claude_jsonl_tail(s.transcript_path)
+            elif s.cwd is not None:
+                proj = _claude_project_dir_for_cwd(s.cwd)
+                if proj is not None:
+                    snap = parse_claude_project_dir(proj)
+        elif s.tool == "codex":
+            if s.transcript_path is not None:
+                snap = parse_codex_rollout_tail(s.transcript_path)
+            elif s.cwd is not None:
+                nc = _normalise_cwd(s.cwd)
+                path = data.cli_rollout_by_cwd.get(nc) if nc else None
+                if path is not None:
+                    snap = parse_codex_rollout_tail(path)
+        if snap is None:
+            continue
+        s.model = snap.model
+        s.input_tokens = snap.input_tokens
+        s.output_tokens = snap.output_tokens
+        s.cache_read = snap.cache_read
+        s.cache_create = snap.cache_create
 
 
 def list_all_sessions() -> list[Session]:
@@ -1063,6 +1117,7 @@ class Sampler:
                 s.cwd = _cwd_cache.get(s.pid)
             if s.project is None and s.cwd is not None:
                 s.project = project_label(s.cwd, self._config)
+        _enrich_session_metrics(raw, self._config)
         self._curr = raw
 
     def raw_sessions(self) -> list[Session]:

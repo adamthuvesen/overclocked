@@ -7,6 +7,7 @@ def test_default_config(tmp_path, monkeypatch):
     monkeypatch.setenv("OVERCLOCKED_HOME", str(tmp_path))
     cfg = load_config()
     assert cfg.redact_paths == ["~/clients/"]
+    assert cfg.session_metrics is True
 
 
 def test_custom_redact_paths(tmp_path, monkeypatch):
@@ -78,3 +79,22 @@ def test_legacy_quorum_home_env_var_still_loads_config(tmp_path, monkeypatch):
     (tmp_path / "config.toml").write_text('[privacy]\nredact_paths = ["~/legacy/"]\n')
     cfg = load_config()
     assert cfg.redact_paths == ["~/legacy/"]
+
+
+def test_session_metrics_false(tmp_path, monkeypatch):
+    monkeypatch.setenv("OVERCLOCKED_HOME", str(tmp_path))
+    (tmp_path / "config.toml").write_text(
+        '[privacy]\nredact_paths = ["~/clients/"]\n[display]\nsession_metrics = false\n',
+    )
+    cfg = load_config()
+    assert cfg.session_metrics is False
+
+
+def test_session_metrics_invalid_type_warns_and_defaults_true(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("OVERCLOCKED_HOME", str(tmp_path))
+    (tmp_path / "config.toml").write_text(
+        '[privacy]\nredact_paths = ["~/clients/"]\n[display]\nsession_metrics = "no"\n',
+    )
+    cfg = load_config()
+    assert cfg.session_metrics is True
+    assert "session_metrics" in capsys.readouterr().err

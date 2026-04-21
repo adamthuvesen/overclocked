@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import sqlite3
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from overclocked.aggregates import TodayHistoryContext
+from overclocked.config import Config
 from overclocked.copy import choose_line
 from overclocked.detectors import Session
 
@@ -59,6 +60,76 @@ def _swiftbar_safe(s: str) -> str:
     return "".join(ch for ch in s if ch == "\t" or ord(ch) >= 32)
 
 
+def _session_token_total(s: Session) -> int:
+    return (
+        (s.input_tokens or 0)
+        + (s.output_tokens or 0)
+        + (s.cache_read or 0)
+        + (s.cache_create or 0)
+    )
+
+
+def _truncate_model_name(model: str, max_len: int = 24) -> str:
+    m = _swiftbar_safe(model)
+    if len(m) <= max_len:
+        return m
+    return m[: max_len - 1] + "…"
+
+
+def _format_token_total(n: int) -> str:
+    if n >= 1_000_000:
+        v = n / 1_000_000
+        s = f"{v:.1f}".rstrip("0").rstrip(".")
+        return f"{s}M"
+    if n >= 1000:
+        v = n / 1000
+        if v >= 100:
+            return f"{round(v)}k"
+        s = f"{v:.1f}".rstrip("0").rstrip(".")
+        return f"{s}k"
+    return str(int(n))
+
+
+def _project_metrics_suffix(
+    sessions: list[Session],
+    tool: str,
+    project_name: str,
+    *,
+    session_metrics: bool,
+) -> str:
+    if not session_metrics:
+        return ""
+    matching: list[Session] = []
+    for s in sessions:
+        if _TOOL_ALIASES.get(s.tool, s.tool) != tool:
+            continue
+        if (s.project or "—") != project_name:
+            continue
+        if s.tool in ("cursor_editor", "cursor_agent"):
+            continue
+        matching.append(s)
+    if not matching:
+        return ""
+    models = [s.model for s in matching if s.model]
+    uniq = sorted(set(models))
+    if len(uniq) > 1:
+        display_model = "…"
+    elif len(uniq) == 1:
+        display_model = uniq[0]
+    else:
+        display_model = None
+    best = max(matching, key=_session_token_total)
+    tot = _session_token_total(best)
+    parts: list[str] = []
+    if display_model:
+        parts.append(_truncate_model_name(display_model))
+    if tot > 0:
+        parts.append(f"{_format_token_total(tot)} tok")
+    if not parts:
+        return ""
+    return " · " + " · ".join(parts)
+
+
 # ── public helpers ────────────────────────────────────────────────────────────
 
 
@@ -90,6 +161,7 @@ def _sparkline_str(values: list[int]) -> str:
 class RenderState:
     sessions: list[Session]
     conn: sqlite3.Connection | None = None
+    config: Config = field(default_factory=Config)
 
 
 def _group_sessions_by_project(sessions: list[Session]) -> dict[str, list[tuple[str, int]]]:
@@ -142,6 +214,12 @@ def dropdown(state: RenderState) -> str:
             cwd=s.cwd,
             project=s.project,
             status=s.status,
+            model=s.model,
+            input_tokens=s.input_tokens,
+            output_tokens=s.output_tokens,
+            cache_read=s.cache_read,
+            cache_create=s.cache_create,
+            transcript_path=s.transcript_path,
         )
         for s in sessions
     ]
@@ -167,8 +245,14 @@ def dropdown(state: RenderState) -> str:
             for project_name, project_count in grouped_projects.get(tool, []):
                 project = _swiftbar_safe(project_name)
                 st = _project_status_suffix(sessions, tool, project_name)
+                mx = _project_metrics_suffix(
+                    sessions,
+                    tool,
+                    project_name,
+                    session_metrics=state.config.session_metrics,
+                )
                 params = _p(color=_ACTIVE, size=12, trim="false")
-                lines.append(f"  {project}  {project_count}{st}{params}")
+                lines.append(f"  {project}  {project_count}{st}{mx}{params}")
         else:
             params = _p(color=_DIM, size=11)
             lines.append(f"{label}  0{params}")

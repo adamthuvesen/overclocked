@@ -74,6 +74,36 @@ def test_cli_dump_state_uses_active_schema(monkeypatch, capsys):
     assert '"hot"' not in captured.out
 
 
+def test_cli_dump_state_includes_session_metrics(monkeypatch, capsys):
+    class FakeSampler:
+        def __init__(self, config):
+            self._sessions = [
+                Session(
+                    tool="claude",
+                    pid=1,
+                    cwd="/dev/proj",
+                    project="proj",
+                    model="claude-opus",
+                    input_tokens=8,
+                    output_tokens=2,
+                    cache_read=100,
+                ),
+            ]
+
+        def tick(self):
+            return None
+
+        def raw_sessions(self):
+            return self._sessions
+
+    monkeypatch.setattr("overclocked.cli.Sampler", FakeSampler)
+    main(["--dump-state"])
+    out = capsys.readouterr().out
+    assert '"model": "claude-opus"' in out
+    assert '"input_tokens": 8' in out
+    assert '"cache_read": 100' in out
+
+
 # ─── --stream mode ──────────────────────────────────────────────────────────
 
 

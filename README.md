@@ -45,6 +45,11 @@ Project paths are stored locally in `~/.overclocked/history.db`. To redact speci
 ```toml
 [privacy]
 redact_paths = ["~/clients/", "~/personal/"]
+
+# Optional: show model + token totals from Claude/Codex transcripts (default: true).
+# Set false to hide these hints in the menu and omit them from --dump-state.
+[display]
+session_metrics = true
 ```
 
 ## Pruning history

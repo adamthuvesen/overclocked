@@ -11,6 +11,7 @@ from overclocked.runtime_home import runtime_home
 @dataclass
 class Config:
     redact_paths: list[str] = field(default_factory=lambda: ["~/clients/"])
+    session_metrics: bool = True
 
     def is_redacted(self, cwd: str | None) -> bool:
         """Return True if cwd starts with any redact_paths prefix."""
@@ -48,4 +49,15 @@ def load_config() -> Config:
             file=sys.stderr,
         )
         return Config()
-    return Config(redact_paths=redact_paths)
+    display = data.get("display", {})
+    session_metrics = True
+    if "session_metrics" in display:
+        raw_sm = display.get("session_metrics")
+        if isinstance(raw_sm, bool):
+            session_metrics = raw_sm
+        else:
+            print(
+                f"overclocked: warning: {config_path}: session_metrics must be bool; using default true",
+                file=sys.stderr,
+            )
+    return Config(redact_paths=redact_paths, session_metrics=session_metrics)

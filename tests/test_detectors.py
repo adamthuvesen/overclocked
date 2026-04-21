@@ -969,3 +969,76 @@ def test_cursor_coarse_status_recent_terminal(tmp_path):
     now = time.time()
     os.utime(t, (now, now))
     assert d._cursor_coarse_status(proj) == "working"
+
+
+# ── session metrics enrichment ────────────────────────────────────────────────
+
+
+def test_enrich_session_metrics_skipped_when_disabled(monkeypatch, tmp_path):
+    import overclocked.detectors as d
+
+    def boom(*_a, **_kw):
+        raise AssertionError("parse should not run when session_metrics is false")
+
+    monkeypatch.setattr(d, "parse_claude_jsonl_tail", boom)
+    s = Session(
+        tool="claude",
+        pid=1,
+        cwd="/Users/me/p",
+        project="p",
+        transcript_path=tmp_path / "x.jsonl",
+    )
+    d._enrich_session_metrics([s], Config(session_metrics=False))
+
+
+def test_enrich_session_metrics_clears_for_redacted_project():
+    import overclocked.detectors as d
+
+    s = Session(
+        tool="claude",
+        pid=1,
+        cwd="/Users/me/x",
+        project="redacted",
+        model="m",
+        input_tokens=9,
+    )
+    d._enrich_session_metrics([s], Config())
+    assert s.model is None
+    assert s.input_tokens is None
+
+
+def test_enrich_session_metrics_clears_for_redacted_cwd():
+    import overclocked.detectors as d
+
+    home = Path.home()
+    cwd = str(home / "clients" / "secret")
+    s = Session(
+        tool="codex",
+        pid=1,
+        cwd=cwd,
+        project="proj",
+        model="gpt",
+        output_tokens=1,
+    )
+    d._enrich_session_metrics([s], Config(redact_paths=["~/clients/"]))
+    assert s.model is None
+    assert s.output_tokens is None
+
+
+def test_enrich_session_metrics_fills_from_transcript(monkeypatch, tmp_path):
+    import overclocked.detectors as d
+    from overclocked.transcript_metrics import UsageSnapshot
+
+    p = tmp_path / "sess.jsonl"
+    p.write_text("{}\n")
+
+    def fake_parse(path: Path):
+        assert path == p
+        return UsageSnapshot(model="claude-3-opus", input_tokens=3, output_tokens=4, cache_read=0, cache_create=0)
+
+    monkeypatch.setattr(d, "parse_claude_jsonl_tail", fake_parse)
+    s = Session(tool="claude", pid=1, cwd="/a", project="p", transcript_path=p)
+    d._enrich_session_metrics([s], Config())
+    assert s.model == "claude-3-opus"
+    assert s.input_tokens == 3
+    assert s.output_tokens == 4
