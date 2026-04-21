@@ -21,27 +21,6 @@ class UsageSnapshot:
     cache_create: int | None = None
 
 
-def _token_total(s: UsageSnapshot) -> int:
-    a = s.input_tokens or 0
-    b = s.output_tokens or 0
-    c = s.cache_read or 0
-    d = s.cache_create or 0
-    return a + b + c + d
-
-
-def _merge_better(current: UsageSnapshot, candidate: UsageSnapshot) -> UsageSnapshot:
-    """Prefer snapshot with higher cumulative token total."""
-    if _token_total(candidate) >= _token_total(current):
-        return UsageSnapshot(
-            model=candidate.model or current.model,
-            input_tokens=candidate.input_tokens,
-            output_tokens=candidate.output_tokens,
-            cache_read=candidate.cache_read,
-            cache_create=candidate.cache_create,
-        )
-    return current
-
-
 def _claude_usage_from_message(msg: dict) -> UsageSnapshot | None:
     if not isinstance(msg, dict):
         return None
@@ -94,6 +73,20 @@ def parse_claude_jsonl_tail(
     if size > tail_bytes and lines:
         lines = lines[1:]
     lines = lines[-max_lines:]
+    active_session: str | None = None
+    for line in lines:
+        line = line.strip()
+        if not line or len(line) > MAX_LINE_BYTES:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        sid = obj.get("sessionId") or obj.get("session_id")
+        if isinstance(sid, str) and sid.strip():
+            active_session = sid.strip()
     for line in lines:
         line = line.strip()
         if not line:
@@ -106,6 +99,10 @@ def parse_claude_jsonl_tail(
             continue
         if not isinstance(obj, dict) or obj.get("type") != "assistant":
             continue
+        row_sid = obj.get("sessionId") or obj.get("session_id")
+        if active_session is not None and isinstance(row_sid, str) and row_sid.strip():
+            if row_sid.strip() != active_session:
+                continue
         msg = obj.get("message")
         if not isinstance(msg, dict):
             continue
@@ -116,8 +113,11 @@ def parse_claude_jsonl_tail(
 
 
 def parse_claude_project_dir(proj: Path) -> UsageSnapshot:
-    """Aggregate best usage snapshot from conversation.jsonl and agent-*.jsonl."""
-    best = UsageSnapshot()
+    """Usage snapshot from the most recently modified transcript (active thread).
+
+    Previously we merged by highest token total, which let stale ``agent-*.jsonl``
+    rows dominate over a freshly started ``conversation.jsonl``.
+    """
     candidates: list[Path] = []
     conv = proj / "conversation.jsonl"
     if conv.is_file():
@@ -131,10 +131,16 @@ def parse_claude_project_dir(proj: Path) -> UsageSnapshot:
                 pass
     except OSError:
         pass
-    for p in candidates[:48]:
-        snap = parse_claude_jsonl_tail(p)
-        best = _merge_better(best, snap)
-    return best
+    scored: list[tuple[Path, float]] = []
+    for p in candidates:
+        try:
+            scored.append((p, p.stat().st_mtime))
+        except OSError:
+            continue
+    if not scored:
+        return UsageSnapshot()
+    scored.sort(key=lambda item: -item[1])
+    return parse_claude_jsonl_tail(scored[0][0])
 
 
 def parse_codex_rollout_tail(
@@ -161,6 +167,7 @@ def parse_codex_rollout_tail(
     if size > tail_bytes and lines:
         lines = lines[1:]
     lines = lines[-max_lines:]
+    parsed: list[dict] = []
     for line in lines:
         line = line.strip()
         if not line or len(line) > MAX_LINE_BYTES:
@@ -169,8 +176,17 @@ def parse_codex_rollout_tail(
             val = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if not isinstance(val, dict):
-            continue
+        if isinstance(val, dict):
+            parsed.append(val)
+    idx_last_turn = -1
+    for i, val in enumerate(parsed):
+        if val.get("type") == "turn_context":
+            idx_last_turn = i
+    # Ignore token_count lines from before the last turn_context in this window.
+    # Otherwise after a new turn/session we still showed the previous segment's totals until a new token_count arrived.
+    start = idx_last_turn if idx_last_turn >= 0 else 0
+    snap = UsageSnapshot()
+    for val in parsed[start:]:
         t = val.get("type")
         if t == "turn_context":
             payload = val.get("payload")
@@ -187,22 +203,25 @@ def parse_codex_rollout_tail(
             info = payload.get("info")
             if not isinstance(info, dict):
                 continue
+            # Prefer last_token_usage (current-turn context snapshot) over
+            # total_token_usage (cumulative session sum). This matches what
+            # Codex shows as context and aligns with abtop's context_tokens.
+            last = info.get("last_token_usage")
             total = info.get("total_token_usage")
-            if not isinstance(total, dict):
+            src = last if isinstance(last, dict) else (total if isinstance(total, dict) else None)
+            if src is None:
                 continue
             try:
-                inp = int(total.get("input_tokens") or 0)
-                out = int(total.get("output_tokens") or 0)
+                inp = int(src.get("input_tokens") or 0)
                 cr = int(
-                    total.get("cached_input_tokens")
-                    or total.get("cache_read_input_tokens")
+                    src.get("cached_input_tokens")
+                    or src.get("cache_read_input_tokens")
                     or 0,
                 )
-                cc = int(total.get("cache_creation_input_tokens") or 0)
+                cc = int(src.get("cache_creation_input_tokens") or 0)
             except (TypeError, ValueError):
                 continue
             snap.input_tokens = inp
-            snap.output_tokens = out
             snap.cache_read = cr
             snap.cache_create = cc
     return snap
