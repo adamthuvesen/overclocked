@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -51,6 +52,17 @@ def save_raw_session_keys(keys: frozenset[tuple[str, int]]) -> None:
     home.mkdir(parents=True, exist_ok=True)
     path = home / _FILENAME
     payload = {"version": _STATE_VERSION, "keys": [list(k) for k in sorted(keys)]}
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(payload), encoding="utf-8")
-    os.replace(tmp, path)
+    data = json.dumps(payload)
+    # Unique temp name: concurrent ``overclocked --once`` (e.g. menubar timer + Refresh)
+    # used to share ``sampler-state.tmp``; the first ``os.replace`` removed it and the
+    # second raised [Errno 2] No such file or directory.
+    fd, tmp_name = tempfile.mkstemp(prefix="sampler-state.", suffix=".tmp", dir=home)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(data)
+        os.replace(tmp_name, path)
+    finally:
+        try:
+            os.unlink(tmp_name)
+        except FileNotFoundError:
+            pass
