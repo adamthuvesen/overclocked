@@ -227,6 +227,35 @@ def _cursor_project_cwd(project_dir: Path) -> str | None:
     return None
 
 
+def _cursor_project_workspace_cwd(project_dir: Path) -> str | None:
+    """Resolve workspace path: terminal metadata first, then ~/.cursor/projects/<slug> inverse."""
+    cwd = _cursor_project_cwd(project_dir)
+    if cwd is not None:
+        return cwd
+    name = project_dir.name
+    if not name or "-" not in name:
+        return None
+    body = name[1:] if name.startswith("-") else name
+    if not body or body.count("-") < 2:
+        # Avoid ambiguous short slugs (e.g. ``Users-me`` → ``/Users/me``) that are not
+        # Cursor's typical multi-segment workspace encoding.
+        return None
+    candidate = "/" + body.replace("-", "/")
+    try:
+        resolved_proj = project_dir.resolve()
+    except OSError:
+        return None
+    hit = _cursor_project_dir_for_cwd(candidate)
+    if hit is None:
+        return None
+    try:
+        if hit.resolve() == resolved_proj:
+            return candidate
+    except OSError:
+        pass
+    return None
+
+
 def _cursor_project_dir_for_cwd(cwd: str) -> Path | None:
     """Resolve ~/.cursor/projects/<encoded> for a workspace path, if it exists."""
     if not _CURSOR_PROJECTS_DIR.exists():
@@ -461,11 +490,8 @@ def cursor_agent_session_is_active(project_dir: Path) -> bool:
     if not transcripts_dir.exists():
         return False
     cutoff = time.time() - _ACTIVITY_WINDOW_SEC
-    try:
-        if transcripts_dir.stat().st_mtime <= cutoff:
-            return False
-    except OSError:
-        return False
+    # Use file mtimes only: the agent-transcripts/ directory mtime often stays stale while
+    # Cursor appends to existing jsonl (many filesystems do not bump the parent on writes).
     for f in transcripts_dir.rglob("*.jsonl"):
         try:
             if f.stat().st_mtime > cutoff:
@@ -611,6 +637,34 @@ def list_claude_sessions() -> list[Session]:
     return _merge_claude_tty_with_desktop(tty_sessions, list_claude_app_sessions())
 
 
+def _cursor_editor_workspace_is_active(project_dir: Path, cutoff: float) -> bool:
+    """True when agent transcripts or integrated-terminal snapshots look recently used.
+
+    Avoids treating ``mcps/``, ``assets/``, etc. (often refreshed app-wide) as workspace
+    activity — those updates bump top-level directory mtimes without local editing.
+    """
+    if cursor_agent_session_is_active(project_dir):
+        return True
+    terminals_dir = project_dir / "terminals"
+    if not terminals_dir.is_dir():
+        return False
+    try:
+        with os.scandir(terminals_dir) as it:
+            for entry in it:
+                if not entry.name.endswith(".txt"):
+                    continue
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                try:
+                    if entry.stat(follow_symlinks=False).st_mtime > cutoff:
+                        return True
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return False
+
+
 def list_cursor_editor_windows() -> list[Session]:
     """Detect open Cursor editor workspaces via the per-project state dirs.
 
@@ -619,7 +673,8 @@ def list_cursor_editor_windows() -> list[Session]:
     Instead we gate on Cursor actually running (any Helper PID present), then
     scan ``~/.cursor/projects/<encoded>/`` — the same source
     :func:`list_cursor_agent_sessions` reads — and emit a session for every
-    project dir with fresh top-level activity that exposes a workspace cwd.
+    project dir with recent **agent** or **integrated-terminal** activity that
+    exposes a workspace cwd.
     """
     if not _pgrep("Cursor Helper"):
         return []
@@ -631,10 +686,9 @@ def list_cursor_editor_windows() -> list[Session]:
     for project_dir in _CURSOR_PROJECTS_DIR.iterdir():
         if not project_dir.is_dir():
             continue
-        latest = _latest_mtime_under(project_dir)
-        if latest < cutoff:
+        if not _cursor_editor_workspace_is_active(project_dir, cutoff):
             continue
-        cwd = _cursor_project_cwd(project_dir)
+        cwd = _cursor_project_workspace_cwd(project_dir)
         if cwd is None:
             continue
         norm = _normalise_cwd(cwd)
@@ -660,12 +714,30 @@ def list_cursor_agent_sessions() -> list[Session]:
             continue
         if not cursor_agent_session_is_active(project_dir):
             continue
-        cwd = _cursor_project_cwd(project_dir)
+        cwd = _cursor_project_workspace_cwd(project_dir)
         if cwd is None:
             continue
         pid = _synthetic_pid(project_dir)
         sessions.append(Session(tool="cursor_agent", pid=pid, cwd=cwd))
     return sessions
+
+
+def _merge_cursor_editor_and_agent(
+    editor: list[Session],
+    agent: list[Session],
+) -> list[Session]:
+    """At most one Cursor session per workspace; prefer cursor_agent when both qualify."""
+    by_norm: dict[str, Session] = {}
+    for s in agent:
+        n = _normalise_cwd(s.cwd)
+        if n is not None:
+            by_norm[n] = s
+    for s in editor:
+        n = _normalise_cwd(s.cwd)
+        if n is None or n in by_norm:
+            continue
+        by_norm[n] = s
+    return list(by_norm.values())
 
 
 def list_codex_sessions() -> list[Session]:
@@ -710,10 +782,11 @@ def list_codex_app_sessions() -> list[Session]:
 
 def list_all_sessions() -> list[Session]:
     """Return all detected active sessions."""
+    cursor_ed = list_cursor_editor_windows()
+    cursor_ag = list_cursor_agent_sessions()
     return (
         list_claude_sessions()
-        + list_cursor_editor_windows()
-        + list_cursor_agent_sessions()
+        + _merge_cursor_editor_and_agent(cursor_ed, cursor_ag)
         + list_codex_sessions()
         + list_codex_app_sessions()
     )

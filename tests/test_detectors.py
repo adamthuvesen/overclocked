@@ -11,6 +11,8 @@ from overclocked.detectors import (
     Sampler,
     Session,
     _claude_pgrep_all,
+    _cursor_project_workspace_cwd,
+    _merge_cursor_editor_and_agent,
     claude_cli_session_is_active,
     codex_app_session_is_active,
     cpu_is_active,
@@ -189,6 +191,20 @@ def test_cursor_agent_inactive_stale_transcript(tmp_path):
     assert not cursor_agent_session_is_active(tmp_path)
 
 
+def test_cursor_agent_active_when_parent_dir_stale_but_jsonl_fresh(tmp_path):
+    """Appending to jsonl does not refresh agent-transcripts/ mtime on many filesystems."""
+    import os
+
+    tx_root = tmp_path / "agent-transcripts"
+    nested = tx_root / "uuid"
+    nested.mkdir(parents=True)
+    f = nested / "t.jsonl"
+    f.write_text("{}")
+    old = time.time() - 2000
+    os.utime(tx_root, (old, old))
+    assert cursor_agent_session_is_active(tmp_path)
+
+
 def test_list_cursor_agent_sessions_detects_recent_transcript(tmp_path, monkeypatch):
     proj = tmp_path / "Users-me-dev-proj"
     transcripts = proj / "agent-transcripts" / "uuid"
@@ -270,6 +286,17 @@ def test_list_cursor_editor_skips_stale_project(tmp_path, monkeypatch):
     assert list_cursor_editor_windows() == []
 
 
+def test_list_cursor_editor_skips_when_only_mcps_fresh(tmp_path, monkeypatch):
+    """Opening Cursor can refresh MCP descriptors without local workspace activity."""
+    _seed_cursor_project(tmp_path, "Users-me-dev-proj", "/Users/me/dev/proj", fresh=False)
+    mcps = tmp_path / "Users-me-dev-proj" / "mcps"
+    mcps.mkdir(parents=True)
+    (mcps / "server.json").write_text("{}")
+    monkeypatch.setattr("overclocked.detectors._CURSOR_PROJECTS_DIR", tmp_path)
+    monkeypatch.setattr("overclocked.detectors._pgrep", lambda p: [7001])
+    assert list_cursor_editor_windows() == []
+
+
 def test_list_cursor_editor_keeps_fresh(tmp_path, monkeypatch):
     _seed_cursor_project(tmp_path, "Users-me-dev-proj", "/Users/me/dev/proj")
     monkeypatch.setattr("overclocked.detectors._CURSOR_PROJECTS_DIR", tmp_path)
@@ -287,6 +314,38 @@ def test_list_cursor_editor_emits_one_per_workspace(tmp_path, monkeypatch):
     monkeypatch.setattr("overclocked.detectors._pgrep", lambda p: [7001])
     sessions = list_cursor_editor_windows()
     assert {s.cwd for s in sessions} == {"/Users/me/dev/projA", "/Users/me/dev/projB"}
+
+
+def test_list_cursor_editor_keeps_when_agent_hot_but_top_level_stale(tmp_path, monkeypatch):
+    """Agents-only churn can leave project-dir top-level mtimes stale."""
+    _seed_cursor_project(tmp_path, "Users-me-dev-proj", "/Users/me/dev/proj", fresh=False)
+    transcripts = tmp_path / "Users-me-dev-proj" / "agent-transcripts" / "u"
+    transcripts.mkdir(parents=True)
+    (transcripts / "u.jsonl").write_text("{}")
+    monkeypatch.setattr("overclocked.detectors._CURSOR_PROJECTS_DIR", tmp_path)
+    monkeypatch.setattr("overclocked.detectors._pgrep", lambda p: [7001])
+    sessions = list_cursor_editor_windows()
+    assert len(sessions) == 1
+    assert sessions[0].cwd == "/Users/me/dev/proj"
+
+
+def test_cursor_workspace_cwd_slug_fallback_without_terminals(tmp_path, monkeypatch):
+    name = "Users-me-dev-proj"
+    proj = tmp_path / name
+    transcripts = proj / "agent-transcripts" / "u"
+    transcripts.mkdir(parents=True)
+    (transcripts / "u.jsonl").write_text("{}")
+    monkeypatch.setattr("overclocked.detectors._CURSOR_PROJECTS_DIR", tmp_path)
+    assert _cursor_project_workspace_cwd(proj) == "/Users/me/dev/proj"
+
+
+def test_merge_cursor_prefers_agent_for_same_cwd():
+    ed = [Session(tool="cursor_editor", pid=101, cwd="/workspace")]
+    ag = [Session(tool="cursor_agent", pid=102, cwd="/workspace")]
+    merged = _merge_cursor_editor_and_agent(ed, ag)
+    assert len(merged) == 1
+    assert merged[0].tool == "cursor_agent"
+    assert merged[0].pid == 102
 
 
 # ── codex_app_session_is_active / list_codex_app_sessions ────────────────────
