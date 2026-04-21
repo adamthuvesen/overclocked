@@ -87,8 +87,10 @@ def test_dropdown_with_sessions():
     assert "🔥" not in output
     assert "Claude Code" in output
     assert "Cursor" in output
-    assert "overclocked  1" in output
-    assert "—  1" in output
+    assert "  overclocked" in output
+    assert "  —" in output
+    assert "overclocked  1" not in output
+    assert "—  1" not in output
 
 
 def test_dropdown_redacted_project():
@@ -112,7 +114,8 @@ def test_dropdown_no_cwd_shows_dash():
     sessions = [Session(tool="codex", pid=4, cwd=None, project=None)]
     state = RenderState(sessions=sessions)
     output = dropdown(state)
-    assert "—  1" in output
+    assert "  —" in output
+    assert "—  1" not in output
 
 
 def test_dropdown_no_db_shows_no_history_line_without_chart_emoji():
@@ -151,13 +154,15 @@ def test_dropdown_shows_status_suffix():
     assert "· working" in output
 
 
-def test_dropdown_mixed_status_ellipsis():
+def test_dropdown_mixed_status_shows_separate_rows():
     sessions = [
         Session(tool="claude", pid=1, cwd="/dev/x", project="x", status="working"),
         Session(tool="claude", pid=2, cwd="/dev/x", project="x", status="waiting"),
     ]
     output = dropdown(RenderState(sessions=sessions))
-    assert "· …" in output
+    assert "· working" in output
+    assert "· waiting" in output
+    assert "· …" not in output
 
 
 def test_dropdown_shows_metrics_suffix():
@@ -173,7 +178,7 @@ def test_dropdown_shows_metrics_suffix():
         ),
     ]
     output = dropdown(RenderState(sessions=sessions, config=Config(session_metrics=True)))
-    assert "1.7k" in output
+    assert "1.5k" in output  # input_tokens=1500; output_tokens excluded from context total
     assert "claude-sonnet-4-20250514" in output or "claude-sonnet-4-202505" in output
 
 
@@ -210,7 +215,7 @@ def test_dropdown_cursor_rows_ignore_metric_fields():
     assert "50k" not in output and "50000" not in output
 
 
-def test_dropdown_mixed_models_show_ellipsis_in_metrics():
+def test_dropdown_mixed_models_one_row_each_in_metrics():
     sessions = [
         Session(
             tool="codex",
@@ -232,10 +237,12 @@ def test_dropdown_mixed_models_show_ellipsis_in_metrics():
         ),
     ]
     output = dropdown(RenderState(sessions=sessions, config=Config(session_metrics=True)))
-    assert "· … ·" in output or "· …" in output
+    assert "gpt-a" in output
+    assert "gpt-b" in output
+    assert "· …" not in output
 
 
-def test_dropdown_groups_same_project_into_single_summary_row():
+def test_dropdown_same_project_stacked_as_one_row_per_session():
     sessions = [
         Session(tool="claude", pid=1, cwd="/dev/almanac", project="almanac"),
         Session(tool="claude", pid=2, cwd="/dev/almanac", project="almanac"),
@@ -243,12 +250,13 @@ def test_dropdown_groups_same_project_into_single_summary_row():
     ]
     state = RenderState(sessions=sessions)
     output = dropdown(state)
-    assert "Claude Code  3" in output
-    assert output.count("almanac  3") == 1
-    assert "almanac  1" not in output
+    assert "Claude Code" in output
+    assert "Claude Code  3" not in output
+    almanac_rows = [ln for ln in output.splitlines() if "  almanac" in ln]
+    assert len(almanac_rows) == 3
 
 
-def test_dropdown_groups_sorted_by_count_then_name():
+def test_dropdown_session_rows_sorted_by_project_then_pid():
     sessions = [
         Session(tool="codex", pid=1, cwd="/dev/beta", project="beta"),
         Session(tool="codex", pid=2, cwd="/dev/beta", project="beta"),
@@ -265,22 +273,24 @@ def test_dropdown_groups_sorted_by_count_then_name():
         for line in project_lines
         if any(name in line for name in ("alpha", "beta", "gamma"))
     ]
-    assert codex_lines[:3] == [
-        "  beta  2 | color=#E8730A size=12 trim=false",
-        "  gamma  2 | color=#E8730A size=12 trim=false",
-        "  alpha  1 | color=#E8730A size=12 trim=false",
+    assert codex_lines == [
+        "  alpha | color=#E8730A size=12 trim=false",
+        "  beta | color=#E8730A size=12 trim=false",
+        "  beta | color=#E8730A size=12 trim=false",
+        "  gamma | color=#E8730A size=12 trim=false",
+        "  gamma | color=#E8730A size=12 trim=false",
     ]
 
 
-def test_dropdown_groups_none_projects_under_single_dash_row():
+def test_dropdown_groups_none_projects_as_one_row_per_session():
     sessions = [
         Session(tool="cursor_agent", pid=1, cwd=None, project=None),
         Session(tool="cursor_agent", pid=2, cwd=None, project=None),
     ]
     state = RenderState(sessions=sessions)
     output = dropdown(state)
-    assert "—  2" in output
-    assert output.count("—  2") == 1
+    assert output.count("  — |") == 2
+    assert "—  2" not in output
 
 
 def test_witty_line_no_quotes_and_italic():
