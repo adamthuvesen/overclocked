@@ -110,6 +110,19 @@ def connect(db_path: str | Path | None = None) -> sqlite3.Connection:
     return conn
 
 
+def dedupe_sessions_by_tool_pid(sessions: list[Session]) -> list[Session]:
+    """Collapse duplicate (tool, pid) rows; first occurrence wins."""
+    seen: set[tuple[str, int]] = set()
+    out: list[Session] = []
+    for s in sessions:
+        k = (s.tool, s.pid)
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(s)
+    return out
+
+
 def write_snapshot(
     conn: sqlite3.Connection,
     active: int,
@@ -118,9 +131,14 @@ def write_snapshot(
     import json
 
     ts = int(time.time())
-    # INSERT OR IGNORE: same-second double-write is a no-op (first write wins)
+    # Same-second double-write: keep latest aggregate values
     conn.execute(
-        "INSERT OR IGNORE INTO snapshots (ts, active, by_tool_json) VALUES (?,?,?)",
+        """
+        INSERT INTO snapshots (ts, active, by_tool_json) VALUES (?,?,?)
+        ON CONFLICT(ts) DO UPDATE SET
+          active = excluded.active,
+          by_tool_json = excluded.by_tool_json
+        """,
         (ts, active, json.dumps(by_tool)),
     )
     conn.commit()
@@ -155,6 +173,7 @@ def reconcile(
     current_sessions: list[Session],
 ) -> None:
     """Open new sessions and close disappeared ones in a single atomic transaction."""
+    current_sessions = dedupe_sessions_by_tool_pid(current_sessions)
     with conn:
         # Build current map using already-resolved Session.cwd and Session.project
         current_map: dict[tuple[str, int], tuple[str | None, str | None]] = {}

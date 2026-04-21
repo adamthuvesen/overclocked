@@ -10,6 +10,7 @@ from overclocked.detectors import Session
 from overclocked.storage import (
     close_session,
     connect,
+    dedupe_sessions_by_tool_pid,
     open_session,
     prune,
     reconcile,
@@ -126,22 +127,34 @@ def test_write_snapshot(db):
     assert "claude" in row["by_tool_json"]
 
 
-def test_write_snapshot_ignore_on_same_second(db):
-    """Same-second double write is a no-op (INSERT OR IGNORE)."""
+def test_write_snapshot_upserts_on_same_second(db):
+    """Same-second double write keeps the latest aggregate values."""
     ts = int(time.time())
     db.execute(
         "INSERT INTO snapshots (ts, active, by_tool_json) VALUES (?,?,?)",
         (ts, 5, "{}"),
     )
     db.commit()
-    # write_snapshot at same ts should be silently ignored
     import unittest.mock as mock
 
     with mock.patch("overclocked.storage.time.time", return_value=ts):
         write_snapshot(db, active=99, by_tool={})
 
     row = db.execute("SELECT active FROM snapshots WHERE ts = ?", (ts,)).fetchone()
-    assert row["active"] == 5  # first write preserved
+    assert row["active"] == 99
+
+
+def test_reconcile_dedupes_duplicate_tool_pid(db):
+    """Duplicate (tool, pid) in one tick must not open multiple DB rows."""
+    a = Session(tool="claude", pid=101, cwd="/x", project="x")
+    b = Session(tool="claude", pid=101, cwd="/x", project="y")
+    reconcile(db, [a, b])
+    rows = db.execute(
+        "SELECT COUNT(*) AS n FROM sessions WHERE ended_at IS NULL AND tool = ? AND pid = ?",
+        ("claude", 101),
+    ).fetchone()
+    assert rows["n"] == 1
+    assert dedupe_sessions_by_tool_pid([a, b]) == [a]
 
 
 # ── open / close session ──────────────────────────────────────────────────────
