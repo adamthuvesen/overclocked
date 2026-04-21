@@ -308,12 +308,25 @@ def test_codex_app_session_inactive_stale(tmp_path):
     assert not codex_app_session_is_active(f)
 
 
-def _make_codex_session(path: Path, cwd: str, originator: str = "Codex Desktop") -> None:
+def _iso_now_z() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+def _make_codex_session(
+    path: Path,
+    cwd: str,
+    originator: str = "Codex Desktop",
+    *,
+    timestamp: str | None = None,
+) -> None:
     import json
 
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"originator": originator, "cwd": cwd}
-    record = {"timestamp": "2026-01-01T00:00:00Z", "type": "session_meta", "payload": payload}
+    ts = _iso_now_z() if timestamp is None else timestamp
+    record = {"timestamp": ts, "type": "session_meta", "payload": payload}
     path.write_text(json.dumps(record) + "\n")
 
 
@@ -323,11 +336,14 @@ def _make_claude_session(
     *,
     entrypoint: str = "claude-desktop",
     session_id: str = "session-1",
+    timestamp: str | None = None,
 ) -> None:
     import json
 
     path.parent.mkdir(parents=True, exist_ok=True)
+    ts = _iso_now_z() if timestamp is None else timestamp
     record = {
+        "timestamp": ts,
         "cwd": cwd,
         "entrypoint": entrypoint,
         "sessionId": session_id,
@@ -611,6 +627,70 @@ def test_list_codex_cli_hides_without_activity(monkeypatch):
     monkeypatch.setattr("overclocked.detectors._resolve_cwd_cached", lambda pid: None)
     monkeypatch.setattr("overclocked.detectors._cpu_percent", lambda pid: 0.0)
     assert list_codex_sessions() == []
+
+
+def test_codex_app_session_inactive_fresh_mtime_stale_transcript(tmp_path):
+    import os
+
+    f = tmp_path / "session.jsonl"
+    _make_codex_session(f, "/Users/me/proj", timestamp="2020-01-01T00:00:00Z")
+    os.utime(f, (time.time(), time.time()))
+    assert not codex_app_session_is_active(f)
+
+
+def test_list_claude_app_sessions_skips_stale_transcript(tmp_path, monkeypatch):
+    import os
+
+    f = tmp_path / "-Users-me-dev-proj" / "session-1.jsonl"
+    _make_claude_session(f, "/Users/me/dev/proj", timestamp="2020-01-01T00:00:00Z")
+    os.utime(f, (time.time(), time.time()))
+    monkeypatch.setattr("overclocked.detectors._CLAUDE_PROJECTS_DIR", tmp_path)
+    assert list_claude_app_sessions() == []
+
+
+def test_list_codex_cli_hides_recent_file_stale_transcript(tmp_path, monkeypatch):
+    import os
+
+    f = tmp_path / "cli.jsonl"
+    _make_codex_session(
+        f,
+        "/Users/me/proj",
+        originator="codex-tui",
+        timestamp="2020-01-01T00:00:00Z",
+    )
+    os.utime(f, (time.time(), time.time()))
+    monkeypatch.setattr("overclocked.detectors._pgrep", lambda p: [9010])
+    monkeypatch.setattr("overclocked.detectors._argv", lambda pid: "codex run")
+    monkeypatch.setattr("overclocked.detectors._ppid", lambda pid: 500)
+    monkeypatch.setattr("overclocked.detectors._has_tty", lambda pid: True)
+    monkeypatch.setattr("overclocked.detectors.is_descendant_of", lambda pid, names: False)
+    monkeypatch.setattr("overclocked.detectors._CODEX_SESSIONS_DIR", tmp_path)
+    monkeypatch.setattr("overclocked.detectors._resolve_cwd_cached", lambda pid: "/Users/me/proj")
+    monkeypatch.setattr("overclocked.detectors._cpu_percent", lambda pid: 0.0)
+    assert list_codex_sessions() == []
+
+
+def test_claude_cli_inactive_stale_agent_transcript(tmp_path, monkeypatch):
+    import json
+
+    proj_dir = tmp_path / ".claude" / "projects" / "-Users-me-dev-proj"
+    proj_dir.mkdir(parents=True)
+    agent = proj_dir / "agent-test.jsonl"
+    record = {"timestamp": "2020-01-01T00:00:00Z", "type": "user", "message": {}}
+    agent.write_text(json.dumps(record) + "\n")
+    fresh = proj_dir / "conversation.jsonl"
+    fresh.write_text("x")
+    monkeypatch.setattr("overclocked.detectors._claude_pgrep_all", lambda: [3002])
+    monkeypatch.setattr("overclocked.detectors._has_tty", lambda pid: True)
+    monkeypatch.setattr("overclocked.detectors.is_descendant_of", lambda pid, names: False)
+    monkeypatch.setattr("overclocked.detectors._CLAUDE_PROJECTS_DIR", proj_dir.parent)
+    monkeypatch.setattr(
+        "overclocked.detectors._resolve_cwd_cached",
+        lambda pid: "/Users/me/dev/proj",
+    )
+    monkeypatch.setattr("overclocked.detectors._cpu_percent", lambda pid: 0.0)
+    monkeypatch.setattr("overclocked.detectors.list_claude_app_sessions", lambda: [])
+    assert list_claude_sessions() == []
 
 
 # ── Sampler (debounce) ────────────────────────────────────────────────────────

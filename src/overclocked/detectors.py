@@ -13,6 +13,7 @@ from pathlib import Path
 from overclocked._subprocess import _safe_check_output
 from overclocked.config import Config
 from overclocked.identity import project_label, resolve_cwd, resolve_cwds_batch
+from overclocked.transcript_time import jsonl_tail_timestamp_result, jsonl_transcript_recent
 
 
 @dataclass
@@ -335,6 +336,12 @@ def _ensure_codex_tick_data() -> CodexTickData:
                 if mtime >= active_cutoff:
                     desktop_rows.append((path, mtime, meta_cwd))
             elif mtime >= active_cutoff:
+                if not jsonl_transcript_recent(
+                    path,
+                    active_cutoff,
+                    use_payload_timestamp=True,
+                ):
+                    continue
                 nc = _normalise_cwd(meta_cwd)
                 if nc:
                     cli_cwds.add(nc)
@@ -344,6 +351,35 @@ def _ensure_codex_tick_data() -> CodexTickData:
         desktop_rows=desktop_rows,
     )
     return _codex_tick_data
+
+
+def _claude_project_agent_transcripts_recent(proj: Path, cutoff: float) -> bool:
+    """True if agent jsonl tails lack timestamps (fallback) or max timestamp >= cutoff."""
+    had_any_parseable = False
+    max_u: float | None = None
+    candidates: list[Path] = []
+    try:
+        for p in proj.rglob("agent-*.jsonl"):
+            try:
+                if p.stat().st_mtime >= cutoff:
+                    candidates.append(p)
+            except OSError:
+                pass
+    except OSError:
+        return True
+    try:
+        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    except OSError:
+        return True
+    for p in candidates[:48]:
+        r = jsonl_tail_timestamp_result(p, use_payload_timestamp=False)
+        if r.had_parseable:
+            had_any_parseable = True
+            if r.max_unix is not None and (max_u is None or r.max_unix > max_u):
+                max_u = r.max_unix
+    if not had_any_parseable:
+        return True
+    return max_u is not None and max_u >= cutoff
 
 
 def claude_cli_session_is_active(pid: int) -> bool:
@@ -356,8 +392,11 @@ def claude_cli_session_is_active(pid: int) -> bool:
     proj = _claude_project_dir_for_cwd(cwd)
     if proj is None:
         return False
+    cutoff = time.time() - _ACTIVITY_WINDOW_SEC
     latest = _latest_mtime_under(proj)
-    return latest > 0.0 and latest >= time.time() - _ACTIVITY_WINDOW_SEC
+    if latest <= 0.0 or latest < cutoff:
+        return False
+    return _claude_project_agent_transcripts_recent(proj, cutoff)
 
 
 def _claude_session_meta(session_file: Path) -> tuple[str | None, str | None]:
@@ -437,11 +476,18 @@ def cursor_agent_session_is_active(project_dir: Path) -> bool:
 
 
 def codex_app_session_is_active(session_file: Path) -> bool:
-    """Return True if the Codex Desktop session file was modified within the activity window."""
+    """Return True if the Codex Desktop session file is active by mtime and transcript time."""
+    cutoff = time.time() - _ACTIVITY_WINDOW_SEC
     try:
-        return session_file.stat().st_mtime > time.time() - _ACTIVITY_WINDOW_SEC
+        if session_file.stat().st_mtime <= cutoff:
+            return False
     except OSError:
         return False
+    return jsonl_transcript_recent(
+        session_file,
+        cutoff,
+        use_payload_timestamp=True,
+    )
 
 
 def _codex_session_meta(session_file: Path) -> tuple[str | None, str | None]:
@@ -515,6 +561,12 @@ def list_claude_app_sessions() -> list[Session]:
         if entrypoint != "claude-desktop":
             continue
         if cwd is None:
+            continue
+        if not jsonl_transcript_recent(
+            session_file,
+            cutoff,
+            use_payload_timestamp=False,
+        ):
             continue
         sessions.append(Session(tool="claude", pid=_synthetic_pid(session_file), cwd=cwd))
     return sessions
