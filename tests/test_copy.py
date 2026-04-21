@@ -133,6 +133,16 @@ def test_sustained_high_load_clears(db):
     assert not any(phrase in result for phrase in ["coordinator", "swarm"])
 
 
+def test_sustained_high_load_requires_all_samples_in_window(db):
+    """If any snapshot in the hour window is below the threshold, sustained copy does not fire."""
+    # Distinct offsets (SQLite PK is ts): one sample at 4, many at 5, all within the last hour.
+    _insert(db, 1234, _SUSTAINED_COUNT - 1)
+    for offset in (211, 577, 899, 1111, 1456, 1688, 2001, 2345, 2678, 2890, 3101, 3288):
+        _insert(db, offset, _SUSTAINED_COUNT)
+    result = choose_line(_SUSTAINED_COUNT, conn=db)
+    assert not any(phrase in result for phrase in ["coordinator", "swarm", "hour", "overclock"])
+
+
 # ── fallback covers high counts ───────────────────────────────────────────────
 
 
