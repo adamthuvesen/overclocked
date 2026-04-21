@@ -6,7 +6,7 @@ A macOS menu bar widget that shows how many AI coding agents (Claude Code, Curso
 🧠 3
 ```
 
-Click to see per-session detail, today's peak/average, and a sparkline. Project rows may show a short **status** (`working`, `waiting`, `done`) from transcript recency and process CPU (same idea as the abtop TUI). The menu bar count **includes all detected sessions** regardless of status.
+Click to see per-session detail, a rotating witty line, and a compact **Today:** peak/average line with a sparkline (no chart emoji on that row). Project rows may show a short **status** (`working`, `waiting`, `done`) from transcript recency and process CPU (same idea as the abtop TUI). The menu bar count **includes all detected sessions** regardless of status.
 
 ## Install
 

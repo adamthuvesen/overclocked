@@ -16,7 +16,6 @@ from overclocked.detectors import Session
 
 _ACTIVE = "#E8730A"  # brighter amber — clearer project rows on light translucent menus
 _HEADER = "#6F5543"  # warm ink — stronger contrast than white on light menus
-_DIM = "#978274"  # muted taupe — still subdued, but not washed out
 _WITTY = "#B59F90"  # warm parchment tint — visible without shouting
 _STATS = "#9D887A"  # medium warm grey — more readable in the stats block
 
@@ -124,7 +123,7 @@ def _project_metrics_suffix(
     if display_model:
         parts.append(_truncate_model_name(display_model))
     if tot > 0:
-        parts.append(f"{_format_token_total(tot)} tok")
+        parts.append(_format_token_total(tot))
     if not parts:
         return ""
     return " · " + " · ".join(parts)
@@ -229,48 +228,46 @@ def dropdown(state: RenderState) -> str:
 
     # ── menu bar line ──────────────────────────────────────────────────────────
     lines.append(menu_bar_line(active))
-    lines.append("---")
 
-    # ── per-tool groups ────────────────────────────────────────────────────────
+    # ── per-tool groups (omit tools with zero active sessions) ─────────────────
+    any_tool = False
     for tool in _TOOL_ORDER:
         tool_sessions = by_tool.get(tool, [])
         count = len(tool_sessions)
+        if count == 0:
+            continue
+        if not any_tool:
+            lines.append("---")
+            any_tool = True
         label = _TOOL_LABELS.get(tool, tool)
         symbol = _TOOL_SYMBOLS.get(tool, "")
+        params = _p(color=_HEADER, size=13, sfimage=symbol)
+        lines.append(f"{label}  {count}{params}")
 
-        if count > 0:
-            params = _p(color=_HEADER, size=13, sfimage=symbol)
-            lines.append(f"{label}  {count}{params}")
-
-            for project_name, project_count in grouped_projects.get(tool, []):
-                project = _swiftbar_safe(project_name)
-                st = _project_status_suffix(sessions, tool, project_name)
-                mx = _project_metrics_suffix(
-                    sessions,
-                    tool,
-                    project_name,
-                    session_metrics=state.config.session_metrics,
-                )
-                params = _p(color=_ACTIVE, size=12, trim="false")
-                lines.append(f"  {project}  {project_count}{st}{mx}{params}")
-        else:
-            params = _p(color=_DIM, size=11)
-            lines.append(f"{label}  0{params}")
+        for project_name, project_count in grouped_projects.get(tool, []):
+            project = _swiftbar_safe(project_name)
+            st = _project_status_suffix(sessions, tool, project_name)
+            mx = _project_metrics_suffix(
+                sessions,
+                tool,
+                project_name,
+                session_metrics=state.config.session_metrics,
+            )
+            params = _p(color=_ACTIVE, size=12, trim="false")
+            lines.append(f"  {project}  {project_count}{st}{mx}{params}")
 
     lines.append("---")
 
-    # ── today's stats + witty (single snapshot query) ────────────────────────
+    # ── witty line (uses history when conn is set) ────────────────────────────
     hist: TodayHistoryContext | None = None
     if conn is not None:
         hist = TodayHistoryContext.load(conn)
-
-    # ── witty line ────────────────────────────────────────────────────────────
     witty = _swiftbar_safe(choose_line(active, conn=conn, ctx=hist))
     params = _p(font="Georgia-Italic", color=_WITTY, size=12)
     lines.append(f"{witty}{params}")
     lines.append("---")
 
-    # ── today's stats ─────────────────────────────────────────────────────────
+    # ── today's stats + sparkline (no leading chart emoji — keeps the row calm)
     if conn is not None and hist is not None:
         peak_count, peak_ts = hist.today_peak()
         avg = hist.today_average()
@@ -282,11 +279,11 @@ def dropdown(state: RenderState) -> str:
 
         if peak_ts:
             peak_time = _swiftbar_safe(datetime.fromtimestamp(peak_ts).strftime("%H:%M"))
-            lines.append(f"📈 Today: peak {peak_count} @ {peak_time}  ·  avg {avg}{stats_params}")
+            lines.append(f"Today: peak {peak_count} @ {peak_time}  ·  avg {avg}{stats_params}")
         else:
-            lines.append(f"📈 Today: avg {avg}{stats_params}")
+            lines.append(f"Today: avg {avg}{stats_params}")
         lines.append(f"  {spark_str}{spark_params}")
     else:
-        lines.append(f"📈 No history yet{_p(color=_STATS)}")
+        lines.append(f"No history yet{_p(color=_STATS)}")
 
     return "\n".join(lines)

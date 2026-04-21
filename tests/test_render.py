@@ -67,13 +67,13 @@ def test_swiftbar_safe_passthrough():
 # ── dropdown ─────────────────────────────────────────────────────────────────
 
 
-def test_dropdown_zero_sessions():
+def test_dropdown_zero_sessions_hides_tool_rows():
     state = RenderState(sessions=[])
     output = dropdown(state)
     assert "🧠  0" in output
-    assert "Claude Code" in output
-    assert "Cursor" in output
-    assert "Codex" in output
+    assert "Claude Code" not in output
+    assert "Cursor" not in output
+    assert "Codex" not in output
 
 
 def test_dropdown_with_sessions():
@@ -115,10 +115,12 @@ def test_dropdown_no_cwd_shows_dash():
     assert "—  1" in output
 
 
-def test_dropdown_no_history_line():
+def test_dropdown_no_db_shows_no_history_line_without_chart_emoji():
     state = RenderState(sessions=[])
     output = dropdown(state)
+    assert "📈" not in output
     assert "No history yet" in output
+    assert "nothing running" in output
 
 
 def test_active_session_row_has_orange_colour():
@@ -171,7 +173,7 @@ def test_dropdown_shows_metrics_suffix():
         ),
     ]
     output = dropdown(RenderState(sessions=sessions, config=Config(session_metrics=True)))
-    assert "1.7k tok" in output or "tok" in output
+    assert "1.7k" in output
     assert "claude-sonnet-4-20250514" in output or "claude-sonnet-4-202505" in output
 
 
@@ -188,7 +190,6 @@ def test_dropdown_session_metrics_false_hides_suffix():
         ),
     ]
     output = dropdown(RenderState(sessions=sessions, config=Config(session_metrics=False)))
-    assert "tok" not in output
     assert "unique-model-xyz" not in output
     assert "100k" not in output
 
@@ -289,7 +290,7 @@ def test_witty_line_no_quotes_and_italic():
     assert "Georgia-Italic" in output
 
 
-def test_sparkline_uses_menlo(tmp_path):
+def test_dropdown_sparkline_uses_menlo_no_chart_emoji(tmp_path):
     import time
 
     from overclocked.storage import connect
@@ -303,7 +304,10 @@ def test_sparkline_uses_menlo(tmp_path):
     conn.commit()
     state = RenderState(sessions=[], conn=conn)
     output = dropdown(state)
+    assert "📈" not in output
+    assert "Today:" in output
     assert "Menlo" in output
+    assert "Georgia-Italic" in output
 
 
 def test_dropdown_pipe_in_project_name():
