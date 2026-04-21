@@ -514,6 +514,58 @@ def test_list_claude_sessions_includes_recent_app_sessions(tmp_path, monkeypatch
     assert sessions[0].cwd == "/Users/me/dev/proj"
 
 
+def test_list_claude_sessions_dedupes_desktop_tty_same_cwd(monkeypatch):
+    """Desktop file-backed session and TTY helper same repo → one row (desktop)."""
+    monkeypatch.setattr(
+        "overclocked.detectors.list_claude_app_sessions",
+        lambda: [Session(tool="claude", pid=500_001, cwd="/Users/me/proj")],
+    )
+    monkeypatch.setattr("overclocked.detectors._claude_pgrep_all", lambda: [777])
+    monkeypatch.setattr("overclocked.detectors._has_tty", lambda pid: True)
+    monkeypatch.setattr("overclocked.detectors.is_descendant_of", lambda pid, names: False)
+    monkeypatch.setattr("overclocked.detectors.claude_cli_session_is_active", lambda pid: True)
+    monkeypatch.setattr(
+        "overclocked.detectors.resolve_cwds_batch",
+        lambda pids, **kw: {777: "/Users/me/proj"},
+    )
+    sessions = list_claude_sessions()
+    assert len(sessions) == 1
+    assert sessions[0].pid == 500_001
+    assert sessions[0].cwd == "/Users/me/proj"
+
+
+def test_list_claude_sessions_two_tty_same_cwd_without_desktop(monkeypatch):
+    monkeypatch.setattr("overclocked.detectors.list_claude_app_sessions", lambda: [])
+    monkeypatch.setattr("overclocked.detectors._claude_pgrep_all", lambda: [10, 11])
+    monkeypatch.setattr("overclocked.detectors._has_tty", lambda pid: True)
+    monkeypatch.setattr("overclocked.detectors.is_descendant_of", lambda pid, names: False)
+    monkeypatch.setattr("overclocked.detectors.claude_cli_session_is_active", lambda pid: True)
+    monkeypatch.setattr(
+        "overclocked.detectors.resolve_cwds_batch",
+        lambda pids, **kw: {10: "/Users/me/repo", 11: "/Users/me/repo"},
+    )
+    sessions = list_claude_sessions()
+    assert len(sessions) == 2
+    assert {s.pid for s in sessions} == {10, 11}
+
+
+def test_list_claude_sessions_keeps_tty_when_cwd_unresolved_desktop_present(monkeypatch):
+    monkeypatch.setattr(
+        "overclocked.detectors.list_claude_app_sessions",
+        lambda: [Session(tool="claude", pid=800_000, cwd="/Users/me/proj")],
+    )
+    monkeypatch.setattr("overclocked.detectors._claude_pgrep_all", lambda: [9])
+    monkeypatch.setattr("overclocked.detectors._has_tty", lambda pid: True)
+    monkeypatch.setattr("overclocked.detectors.is_descendant_of", lambda pid, names: False)
+    monkeypatch.setattr("overclocked.detectors.claude_cli_session_is_active", lambda pid: True)
+    monkeypatch.setattr("overclocked.detectors.resolve_cwds_batch", lambda pids, **kw: {9: None})
+    sessions = list_claude_sessions()
+    assert len(sessions) == 2
+    by_pid = {s.pid: s for s in sessions}
+    assert by_pid[800_000].cwd == "/Users/me/proj"
+    assert by_pid[9].cwd is None
+
+
 # ── _claude_pgrep_all (single call per tick) ──────────────────────────────────
 
 

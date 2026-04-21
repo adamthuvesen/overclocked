@@ -572,6 +572,30 @@ def list_claude_app_sessions() -> list[Session]:
     return sessions
 
 
+def _merge_claude_tty_with_desktop(
+    tty_sessions: list[Session],
+    app_sessions: list[Session],
+) -> list[Session]:
+    """Drop TTY claude rows when a desktop session already covers the same cwd."""
+    desktop_norm: set[str] = set()
+    for s in app_sessions:
+        n = _normalise_cwd(s.cwd)
+        if n is not None:
+            desktop_norm.add(n)
+    if not tty_sessions:
+        return list(app_sessions)
+    pids = [s.pid for s in tty_sessions]
+    cwds = resolve_cwds_batch(pids)
+    kept_tty: list[Session] = []
+    for s in tty_sessions:
+        cwd = cwds.get(s.pid)
+        n = _normalise_cwd(cwd)
+        if n is not None and n in desktop_norm:
+            continue
+        kept_tty.append(Session(tool="claude", pid=s.pid, cwd=cwd))
+    return list(app_sessions) + kept_tty
+
+
 def list_claude_sessions() -> list[Session]:
     """Detect active Claude Code terminal and desktop sessions."""
     tty_sessions: list[Session] = []
@@ -584,7 +608,7 @@ def list_claude_sessions() -> list[Session]:
             continue
         tty_sessions.append(Session(tool="claude", pid=pid))
 
-    return tty_sessions + list_claude_app_sessions()
+    return _merge_claude_tty_with_desktop(tty_sessions, list_claude_app_sessions())
 
 
 def list_cursor_editor_windows() -> list[Session]:
