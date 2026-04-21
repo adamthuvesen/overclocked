@@ -67,7 +67,8 @@ def choose_line(
     if current >= _SUSTAINED_COUNT:
         sustained_since = now - _SUSTAINED_DURATION_S
         in_sustained = [(t, a) for t, a in rows if t >= sustained_since]
-        if in_sustained and in_sustained[0][1] >= _SUSTAINED_COUNT:
+        counts = [a for _, a in in_sustained]
+        if counts and min(counts) >= _SUSTAINED_COUNT:
             idx = (now // 30) % len(_SUSTAINED_LINES)
             return _SUSTAINED_LINES[idx]
 

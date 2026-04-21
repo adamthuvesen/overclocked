@@ -19,7 +19,13 @@ from overclocked.detectors import Sampler, Session, stable_sessions_from_keys
 from overclocked.render import RenderState, dropdown
 from overclocked.runtime_home import runtime_home
 from overclocked.sampler_state import load_raw_session_keys, save_raw_session_keys
-from overclocked.storage import connect, prune, reconcile, write_snapshot
+from overclocked.storage import (
+    connect,
+    dedupe_sessions_by_tool_pid,
+    prune,
+    reconcile,
+    write_snapshot,
+)
 
 
 def _build_state_dict(sessions):
@@ -33,6 +39,8 @@ def _build_state_dict(sessions):
             "project": s.project,
             "status": s.status,
         }
+        if s.synthetic:
+            row["synthetic"] = True
         if s.model is not None:
             row["model"] = s.model
         if s.input_tokens is not None:
@@ -65,7 +73,7 @@ def _render_once(
     curr = sampler.raw_sessions()
     k_curr = Sampler.raw_session_keys(curr)
     baseline = prev_raw_keys if prev_raw_keys else k_curr
-    sessions = stable_sessions_from_keys(curr, baseline)
+    sessions = dedupe_sessions_by_tool_pid(stable_sessions_from_keys(curr, baseline))
 
     by_tool: dict[str, int] = {}
     for s in sessions:
@@ -115,7 +123,7 @@ def _log_exception(exc: BaseException) -> None:
 def _run_once(config: Config) -> None:
     """Single SwiftBar render — used by --once and as the inner body of --stream."""
     with contextlib.closing(connect()) as conn:
-        sessions = _sample_stable_sessions(config)
+        sessions = dedupe_sessions_by_tool_pid(_sample_stable_sessions(config))
 
         by_tool: dict[str, int] = {}
         for s in sessions:
@@ -232,7 +240,17 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--dump-state",
         action="store_true",
-        help="Print current detection state as JSON and exit",
+        help=(
+            "Print raw detector sample (one tick, no debounce) as JSON and exit; "
+            "see --dump-state-stable for menu-stable keys"
+        ),
+    )
+    parser.add_argument(
+        "--dump-state-stable",
+        action="store_true",
+        help=(
+            "Print debounced session list (same stability as the menubar) as JSON and exit"
+        ),
     )
     parser.add_argument(
         "--prune",
@@ -249,6 +267,11 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     config = load_config()
+
+    if args.dump_state_stable:
+        sessions = dedupe_sessions_by_tool_pid(_sample_stable_sessions(config))
+        print(json.dumps(_build_state_dict(sessions), indent=2))
+        return
 
     if args.dump_state:
         sampler = Sampler(config)

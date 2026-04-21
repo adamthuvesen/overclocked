@@ -151,7 +151,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let insertIndex = 1
-        for rawLine in lines.prefix(40).reversed() {
+        for rawLine in lines.prefix(128).reversed() {
             if rawLine == "---" {
                 menu.insertItem(.separator(), at: insertIndex)
                 continue
