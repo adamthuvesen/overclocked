@@ -4,6 +4,8 @@
 # <xbar.author>adamthuvesen</xbar.author>
 # <xbar.desc>Track active AI coding copilot sessions (Claude Code, Cursor, Codex)</xbar.desc>
 # <xbar.dependencies>python3,overclocked</xbar.dependencies>
+# <swiftbar.type>streamable</swiftbar.type>
+# <swiftbar.useTrailingStreamSeparator>true</swiftbar.useTrailingStreamSeparator>
 
 import subprocess
 import sys
@@ -15,5 +17,11 @@ _VENV_BIN = _REPO_ROOT / ".venv" / "bin" / "overclocked"
 
 OVERCLOCKED_BIN = str(_VENV_BIN) if _VENV_BIN.exists() else "overclocked"
 
-result = subprocess.run([OVERCLOCKED_BIN, "--once"], capture_output=True, text=True)
-sys.stdout.write(result.stdout if result.returncode == 0 else "🧠 ?\n---\noverclocked not found\n")
+try:
+    with subprocess.Popen([OVERCLOCKED_BIN, "--stream"], stdout=subprocess.PIPE, text=True) as proc:
+        for line in proc.stdout:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+except FileNotFoundError:
+    sys.stdout.write("🧠 ?\n---\noverclocked not found — check your .venv\n~~~\n")
+    sys.stdout.flush()
