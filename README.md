@@ -23,16 +23,7 @@ ln -sf "$(pwd)/scripts/overclocked.5s.py" "$PLUGINS_DIR/overclocked.5s.py"
 chmod +x "$PLUGINS_DIR/overclocked.5s.py"
 ```
 
-Refresh SwiftBar — you should see `🧠 0` in your menu bar.
-
-### Native fallback
-
-If SwiftBar is flaky, there's a native AppKit alternative:
-
-```bash
-./scripts/build-menubar-app.sh
-open ~/Applications/Overclocked.app
-```
+Restart SwiftBar — you should see `🧠 0` in your menu bar. The plugin polls every 5 seconds.
 
 ## Privacy
 
