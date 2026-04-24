@@ -7,7 +7,8 @@ def test_default_config(tmp_path, monkeypatch):
     monkeypatch.setenv("OVERCLOCKED_HOME", str(tmp_path))
     cfg = load_config()
     assert cfg.redact_paths == ["~/clients/"]
-    assert cfg.session_metrics is True
+    assert cfg.session_status is False
+    assert cfg.session_metrics is False
 
 
 def test_custom_redact_paths(tmp_path, monkeypatch):
@@ -90,11 +91,31 @@ def test_session_metrics_false(tmp_path, monkeypatch):
     assert cfg.session_metrics is False
 
 
-def test_session_metrics_invalid_type_warns_and_defaults_true(tmp_path, monkeypatch, capsys):
+def test_session_metrics_invalid_type_warns_and_defaults_false(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("OVERCLOCKED_HOME", str(tmp_path))
     (tmp_path / "config.toml").write_text(
         '[privacy]\nredact_paths = ["~/clients/"]\n[display]\nsession_metrics = "no"\n',
     )
     cfg = load_config()
-    assert cfg.session_metrics is True
+    assert cfg.session_metrics is False
     assert "session_metrics" in capsys.readouterr().err
+
+
+def test_session_status_true(tmp_path, monkeypatch):
+    monkeypatch.setenv("OVERCLOCKED_HOME", str(tmp_path))
+    (tmp_path / "config.toml").write_text(
+        '[display]\nsession_status = true\n',
+    )
+    cfg = load_config()
+    assert cfg.session_status is True
+    assert cfg.session_metrics is False
+
+
+def test_session_status_invalid_type_warns_and_defaults_false(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("OVERCLOCKED_HOME", str(tmp_path))
+    (tmp_path / "config.toml").write_text(
+        '[display]\nsession_status = "yes"\n',
+    )
+    cfg = load_config()
+    assert cfg.session_status is False
+    assert "session_status" in capsys.readouterr().err

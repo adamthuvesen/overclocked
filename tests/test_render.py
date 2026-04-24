@@ -150,8 +150,16 @@ def test_dropdown_shows_status_suffix():
             status="working",
         ),
     ]
-    output = dropdown(RenderState(sessions=sessions))
+    output = dropdown(RenderState(sessions=sessions, config=Config(session_status=True)))
     assert "· working" in output
+
+
+def test_dropdown_default_hides_status_suffix():
+    sessions = [
+        Session(tool="claude", pid=1, cwd="/dev/x", project="x", status="working"),
+    ]
+    output = dropdown(RenderState(sessions=sessions))
+    assert "· working" not in output
 
 
 def test_dropdown_mixed_status_shows_separate_rows():
@@ -159,7 +167,7 @@ def test_dropdown_mixed_status_shows_separate_rows():
         Session(tool="claude", pid=1, cwd="/dev/x", project="x", status="working"),
         Session(tool="claude", pid=2, cwd="/dev/x", project="x", status="waiting"),
     ]
-    output = dropdown(RenderState(sessions=sessions))
+    output = dropdown(RenderState(sessions=sessions, config=Config(session_status=True)))
     assert "· working" in output
     assert "· waiting" in output
     assert "· …" not in output
@@ -182,6 +190,23 @@ def test_dropdown_shows_metrics_suffix():
     assert "claude-sonnet-4-20250514" in output or "claude-sonnet-4-202505" in output
 
 
+def test_dropdown_default_hides_metrics_suffix():
+    sessions = [
+        Session(
+            tool="claude",
+            pid=1,
+            cwd="/dev/x",
+            project="x",
+            model="unique-model-xyz-991",
+            input_tokens=99999,
+            output_tokens=1,
+        ),
+    ]
+    output = dropdown(RenderState(sessions=sessions))
+    assert "unique-model-xyz" not in output
+    assert "100k" not in output
+
+
 def test_dropdown_session_metrics_false_hides_suffix():
     sessions = [
         Session(
@@ -197,6 +222,27 @@ def test_dropdown_session_metrics_false_hides_suffix():
     output = dropdown(RenderState(sessions=sessions, config=Config(session_metrics=False)))
     assert "unique-model-xyz" not in output
     assert "100k" not in output
+
+
+def test_dropdown_status_and_metrics_compose_in_order():
+    sessions = [
+        Session(
+            tool="claude",
+            pid=1,
+            cwd="/dev/x",
+            project="x",
+            status="waiting",
+            model="gpt-5",
+            input_tokens=37000,
+        ),
+    ]
+    output = dropdown(
+        RenderState(
+            sessions=sessions,
+            config=Config(session_status=True, session_metrics=True),
+        ),
+    )
+    assert "x · waiting · gpt-5 · 37k" in output
 
 
 def test_dropdown_cursor_rows_ignore_metric_fields():

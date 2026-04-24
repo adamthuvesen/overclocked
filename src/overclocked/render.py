@@ -86,7 +86,9 @@ def _format_token_total(n: int) -> str:
     return str(int(n))
 
 
-def _session_status_suffix(s: Session) -> str:
+def _session_status_suffix(s: Session, *, session_status: bool) -> str:
+    if not session_status:
+        return ""
     if not s.status:
         return ""
     return f" · {_swiftbar_safe(s.status)}"
@@ -182,7 +184,7 @@ def dropdown(state: RenderState) -> str:
 
         for s in _sessions_for_tool_ordered(sessions, tool):
             project = _swiftbar_safe(s.project or "—")
-            st = _session_status_suffix(s)
+            st = _session_status_suffix(s, session_status=state.config.session_status)
             mx = _session_metrics_suffix(s, session_metrics=state.config.session_metrics)
             row_params = _p(color=_ACTIVE, size=12, trim="false")
             lines.append(f"  {project}{st}{mx}{row_params}")

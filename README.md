@@ -2,7 +2,7 @@
 
 A macOS menu bar widget that shows how many AI coding agents (Claude Code, Cursor, Codex) are active at once. Use to avoid AI brain fry.
 
-Project rows show a short **status** (`working`, `waiting`, `done`) from transcript recency and process CPU (same idea as the abtop TUI). The menu bar count **includes all detected sessions** regardless of status.
+Project rows default to a compact project-only display. Optional row decorations can show a short **status** (`working`, `waiting`, `done`) from transcript recency and process CPU, plus model/token hints where available. The menu bar count **includes all detected sessions** regardless of display settings.
 
 ## Install
 
@@ -33,10 +33,13 @@ Project paths are stored locally in `~/.overclocked/history.db`. To redact speci
 [privacy]
 redact_paths = ["~/clients/", "~/personal/"]
 
-# Optional: show model + token totals from Claude/Codex transcripts (default: true).
-# Set false to hide these hints in the menu and omit them from --dump-state.
+# Optional: show per-row status text in the dropdown (default: false).
 [display]
-session_metrics = true
+session_status = false
+
+# Optional: show model + token totals from Claude/Codex transcripts (default: false).
+# Cursor rows intentionally stay metric-free.
+session_metrics = false
 ```
 
 ## Pruning history

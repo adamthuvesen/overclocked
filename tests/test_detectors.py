@@ -1035,7 +1035,7 @@ def test_enrich_session_metrics_clears_for_redacted_project():
         model="m",
         input_tokens=9,
     )
-    d._enrich_session_metrics([s], Config())
+    d._enrich_session_metrics([s], Config(session_metrics=True))
     assert s.model is None
     assert s.input_tokens is None
 
@@ -1053,7 +1053,7 @@ def test_enrich_session_metrics_clears_for_redacted_cwd():
         model="gpt",
         output_tokens=1,
     )
-    d._enrich_session_metrics([s], Config(redact_paths=["~/clients/"]))
+    d._enrich_session_metrics([s], Config(redact_paths=["~/clients/"], session_metrics=True))
     assert s.model is None
     assert s.output_tokens is None
 
@@ -1071,7 +1071,7 @@ def test_enrich_session_metrics_fills_from_transcript(monkeypatch, tmp_path):
 
     monkeypatch.setattr(d, "parse_claude_jsonl_tail", fake_parse)
     s = Session(tool="claude", pid=1, cwd="/a", project="p", transcript_path=p)
-    d._enrich_session_metrics([s], Config())
+    d._enrich_session_metrics([s], Config(session_metrics=True))
     assert s.model == "claude-3-opus"
     assert s.input_tokens == 3
     assert s.output_tokens == 4
@@ -1121,6 +1121,6 @@ def test_enrich_claude_tty_matches_abtop_per_session_transcript(tmp_path, monkey
 
     a = Session(tool="claude", pid=100, cwd=cwd, project="repo")
     b = Session(tool="claude", pid=200, cwd=cwd, project="repo")
-    d._enrich_session_metrics([a, b], Config())
+    d._enrich_session_metrics([a, b], Config(session_metrics=True))
     assert a.input_tokens == 10
     assert b.input_tokens == 5000
