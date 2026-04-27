@@ -59,18 +59,3 @@ class TodayHistoryContext:
             hour_bucket = (t - self.midnight) // 3600
             buckets[hour_bucket] = max(buckets.get(hour_bucket, 0), a)
         return [buckets.get(h, 0) for h in range(current_hour + 1)]
-
-
-def today_peak(conn: sqlite3.Connection) -> tuple[int, int | None]:
-    """Return (max_active, ts_of_peak) since local midnight, or (0, None)."""
-    return TodayHistoryContext.load(conn).today_peak()
-
-
-def today_average(conn: sqlite3.Connection) -> float:
-    """Return mean active count since local midnight, rounded to 1 decimal."""
-    return TodayHistoryContext.load(conn).today_average()
-
-
-def today_sparkline(conn: sqlite3.Connection) -> list[int]:
-    """Return hourly max active counts from midnight through the current hour."""
-    return TodayHistoryContext.load(conn).today_sparkline()

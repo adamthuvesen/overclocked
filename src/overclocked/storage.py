@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
+import statistics
 import time
+from collections import defaultdict
 from collections.abc import Callable
 from pathlib import Path
 
@@ -128,8 +131,6 @@ def write_snapshot(
     active: int,
     by_tool: dict[str, int],
 ) -> None:
-    import json
-
     ts = int(time.time())
     # Same-second double-write: keep latest aggregate values
     conn.execute(
@@ -216,9 +217,6 @@ def prune(conn: sqlite3.Connection) -> None:
     ).fetchall()
 
     if rows:
-        import statistics
-        from collections import defaultdict
-
         buckets: dict[int, list[int]] = defaultdict(list)
         for row in rows:
             bucket = (row["ts"] // 60) * 60

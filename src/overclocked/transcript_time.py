@@ -18,8 +18,6 @@ class JsonlTailTimestampResult:
 
 def parse_iso_timestamp_to_unix(s: str) -> float | None:
     """Parse an ISO-8601 instant to Unix time, or None on failure."""
-    if not isinstance(s, str):
-        return None
     t = s.strip()
     if not t:
         return None
