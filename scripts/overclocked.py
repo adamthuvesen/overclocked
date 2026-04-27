@@ -23,5 +23,5 @@ try:
             sys.stdout.write(line)
             sys.stdout.flush()
 except FileNotFoundError:
-    sys.stdout.write("🧠 ?\n---\noverclocked not found — check your .venv\n~~~\n")
+    sys.stdout.write("👾 ?\n---\noverclocked not found — check your .venv\n~~~\n")
     sys.stdout.flush()

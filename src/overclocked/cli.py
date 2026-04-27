@@ -196,7 +196,7 @@ def _run_stream(config: Config, interval: float) -> None:
                 _log_exception(exc)
                 first_line = str(exc).splitlines()[0] if str(exc) else type(exc).__name__
                 try:
-                    sys.stdout.write(f"🧠 !\n---\n{first_line}\n~~~\n")
+                    sys.stdout.write(f"👾 !\n---\n{first_line}\n~~~\n")
                     sys.stdout.flush()
                 except BrokenPipeError:
                     break
@@ -248,9 +248,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--dump-state-stable",
         action="store_true",
-        help=(
-            "Print debounced session list (same stability as the menubar) as JSON and exit"
-        ),
+        help=("Print debounced session list (same stability as the menubar) as JSON and exit"),
     )
     parser.add_argument(
         "--prune",
@@ -291,7 +289,7 @@ def main(argv: list[str] | None = None) -> None:
         _run_once(config)
     except Exception as exc:
         first_line = str(exc).splitlines()[0] if str(exc) else type(exc).__name__
-        print(f"🧠 !\n---\n{first_line}")
+        print(f"👾 !\n---\n{first_line}")
         traceback.print_exc(file=sys.stderr)
         _log_exception(exc)
 

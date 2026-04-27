@@ -23,7 +23,7 @@ ln -sf "$(pwd)/scripts/overclocked.5s.py" "$PLUGINS_DIR/overclocked.5s.py"
 chmod +x "$PLUGINS_DIR/overclocked.5s.py"
 ```
 
-Restart SwiftBar — you should see `🧠 0` in your menu bar. The plugin polls every 5 seconds.
+Restart SwiftBar — you should see `👾 0` in your menu bar. The plugin polls every 5 seconds.
 
 ## Privacy
 

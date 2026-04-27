@@ -12,7 +12,7 @@ from overclocked.detectors import Session
 
 
 def test_cli_guard_exits_zero_on_storage_error(tmp_path, monkeypatch, capsys):
-    """cli.main() exits 0 with 🧠 ! on stdout when storage raises."""
+    """cli.main() exits 0 with 👾 ! on stdout when storage raises."""
     monkeypatch.setenv("OVERCLOCKED_HOME", str(tmp_path))
 
     def raise_op_error(*a, **kw):
@@ -24,7 +24,7 @@ def test_cli_guard_exits_zero_on_storage_error(tmp_path, monkeypatch, capsys):
     main(["--once"])
 
     captured = capsys.readouterr()
-    assert "🧠 !" in captured.out
+    assert "👾 !" in captured.out
     assert "OperationalError" in captured.err or "database is locked" in captured.err
 
 
@@ -154,7 +154,7 @@ class _NoOpCm:
 
 def test_stream_emits_separator_between_renders(monkeypatch, capsys):
     def render(n, prev):
-        return (f"🧠 {n}\n---\nfoo", frozenset({("claude", n)}), [])
+        return (f"👾 {n}\n---\nfoo", frozenset({("claude", n)}), [])
 
     captured = _install_stream_harness(monkeypatch, render, stop_after_renders=3)
 
@@ -162,8 +162,8 @@ def test_stream_emits_separator_between_renders(monkeypatch, capsys):
 
     out = capsys.readouterr().out
     assert out.count("~~~") == 3
-    assert out.count("🧠") == 3
-    assert "🧠 1" in out and "🧠 2" in out and "🧠 3" in out
+    assert out.count("👾") == 3
+    assert "👾 1" in out and "👾 2" in out and "👾 3" in out
     assert captured["renders"] == 3
 
 
@@ -171,17 +171,17 @@ def test_stream_survives_render_exception(monkeypatch, capsys):
     def render(n, prev):
         if n == 2:
             raise RuntimeError("transient detector hiccup")
-        return (f"🧠 {n}\n---\nfoo", frozenset(), [])
+        return (f"👾 {n}\n---\nfoo", frozenset(), [])
 
     _install_stream_harness(monkeypatch, render, stop_after_renders=3)
 
     main(["--stream", "--interval", "0"])
 
     out = capsys.readouterr().out
-    assert "🧠 1" in out
-    assert "🧠 !" in out
+    assert "👾 1" in out
+    assert "👾 !" in out
     assert "transient detector hiccup" in out
-    assert "🧠 3" in out
+    assert "👾 3" in out
     assert out.count("~~~") == 3
 
 
@@ -189,7 +189,7 @@ def test_stream_persists_last_keys_on_shutdown(monkeypatch, capsys):
     saved = {"keys": None}
 
     def render(n, prev):
-        return (f"🧠 {n}\n---\nfoo", frozenset({("codex", n)}), [])
+        return (f"👾 {n}\n---\nfoo", frozenset({("codex", n)}), [])
 
     _install_stream_harness(monkeypatch, render, stop_after_renders=2)
     monkeypatch.setattr(
@@ -257,7 +257,7 @@ def test_stream_exits_cleanly_on_broken_pipe(monkeypatch):
     monkeypatch.setattr("overclocked.cli.os.getppid", lambda: 4242)
     monkeypatch.setattr(
         "overclocked.cli._render_once",
-        lambda config, conn, prev: ("🧠 1\n---\nfoo", frozenset({("claude", 1)}), []),
+        lambda config, conn, prev: ("👾 1\n---\nfoo", frozenset({("claude", 1)}), []),
     )
 
     class FakeStdout:

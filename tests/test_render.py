@@ -35,11 +35,11 @@ def test_humanise_zero():
 
 
 def test_menu_bar_zero():
-    assert menu_bar_line(0) == "🧠  0"
+    assert menu_bar_line(0) == "👾  0"
 
 
 def test_menu_bar_nonzero():
-    assert menu_bar_line(3) == "🧠  3"
+    assert menu_bar_line(3) == "👾  3"
 
 
 # ── _swiftbar_safe ────────────────────────────────────────────────────────────
@@ -70,7 +70,7 @@ def test_swiftbar_safe_passthrough():
 def test_dropdown_zero_sessions_hides_tool_rows():
     state = RenderState(sessions=[])
     output = dropdown(state)
-    assert "🧠  0" in output
+    assert "👾  0" in output
     assert "Claude Code" not in output
     assert "Cursor" not in output
     assert "Codex" not in output
@@ -83,7 +83,7 @@ def test_dropdown_with_sessions():
     ]
     state = RenderState(sessions=sessions)
     output = dropdown(state)
-    assert "🧠  2" in output
+    assert "👾  2" in output
     assert "🔥" not in output
     assert "Claude Code" in output
     assert "Cursor" in output
@@ -315,9 +315,7 @@ def test_dropdown_session_rows_sorted_by_project_then_pid():
     lines = output.splitlines()
     project_lines = [line for line in lines if line.startswith("  ")]
     codex_lines = [
-        line
-        for line in project_lines
-        if any(name in line for name in ("alpha", "beta", "gamma"))
+        line for line in project_lines if any(name in line for name in ("alpha", "beta", "gamma"))
     ]
     assert codex_lines == [
         "  alpha | color=#E8730A size=12 trim=false",

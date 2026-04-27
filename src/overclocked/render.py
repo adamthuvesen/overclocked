@@ -135,7 +135,7 @@ def humanise_delta(seconds: float) -> str:
 
 def menu_bar_line(active: int) -> str:
     """Return the compact menu bar string."""
-    return f"🧠  {active}"
+    return f"👾  {active}"
 
 
 def _sparkline_str(values: list[int]) -> str:
