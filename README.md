@@ -1,65 +1,121 @@
 # overclocked
 
-A macOS menu bar widget that shows how many AI coding agents (Claude Code, Cursor, Codex) are active at once. Use to avoid AI brain fry.
+A macOS SwiftBar widget that counts active AI coding sessions across Claude Code,
+Cursor, and Codex, with a small dropdown for project names and today's local history.
+Useful when the agent stack starts getting a little too spicy.
 
-Project rows default to a compact project-only display. Optional row decorations can show a short **status** (`working`, `waiting`, `done`) from transcript recency and process CPU, plus model/token hints where available. The menu bar count **includes all detected sessions** regardless of display settings.
+The menu bar count includes every detected session. Dropdown rows are compact by
+default, and can optionally show model/context hints where the underlying tool
+exposes transcript data.
+
+## What it tracks
+
+- Claude Code CLI sessions and Claude Desktop-backed project sessions.
+- Cursor editor and agent workspaces, collapsed to one row per workspace.
+- Codex CLI sessions and Codex Desktop rollout files.
+- Today's peak, average, and hourly sparkline from the local SQLite history.
+
+Cursor rows intentionally do not show model or token metrics.
 
 ## Install
 
 ```bash
 git clone <repo>
 cd overclocked
-uv venv && source .venv/bin/activate
+uv venv
+source .venv/bin/activate
 uv pip install -e ".[dev]"
 ```
 
+This installs the `overclocked` CLI from `overclocked.cli:main`. The package has no
+runtime Python dependencies beyond the standard library; dev extras install `pytest`,
+`pytest-cov`, and `ruff`.
+
 ## SwiftBar
 
-Install [SwiftBar](https://github.com/swiftbar/SwiftBar), then symlink the plugin:
+Install [SwiftBar](https://github.com/swiftbar/SwiftBar), then symlink the streamable
+plugin:
 
 ```bash
 PLUGINS_DIR="$HOME/Library/Application Support/SwiftBar/Plugins"
-ln -sf "$(pwd)/scripts/overclocked.5s.py" "$PLUGINS_DIR/overclocked.5s.py"
-chmod +x "$PLUGINS_DIR/overclocked.5s.py"
+mkdir -p "$PLUGINS_DIR"
+ln -sf "$(pwd)/scripts/overclocked.py" "$PLUGINS_DIR/overclocked.py"
+chmod +x "$PLUGINS_DIR/overclocked.py"
 ```
 
-Restart SwiftBar — you should see `👾 0` in your menu bar. The plugin polls every 5 seconds.
+Restart SwiftBar. You should see `👾  0` in the menu bar when no sessions are active.
 
-## Privacy
+The plugin runs `overclocked --stream`, keeps a long-lived process open, and emits
+SwiftBar stream separators between updates. The default stream interval is 5 seconds.
 
-Project paths are stored locally in `~/.overclocked/history.db`. To redact specific directories, create `~/.overclocked/config.toml`:
+## Configuration
+
+Runtime files live in `~/.overclocked/` by default:
+
+- `config.toml`: optional privacy/display configuration.
+- `history.db`: local SQLite snapshots and session history.
+- `error.log`: best-effort stream/runtime exception log.
+
+Set `OVERCLOCKED_HOME` to use a different runtime directory.
+
+Example `~/.overclocked/config.toml`:
 
 ```toml
 [privacy]
+# Default: ["~/clients/"]; matches path segments, not sibling prefixes.
 redact_paths = ["~/clients/", "~/personal/"]
 
-# Optional: show per-row status text in the dropdown (default: false).
 [display]
-session_status = false
-
-# Optional: show model + token totals from Claude/Codex transcripts (default: false).
-# Cursor rows intentionally stay metric-free.
+# Show Claude/Codex model and context-token totals. Default: false.
 session_metrics = false
 ```
 
-## Pruning history
+No network calls, telemetry, or remote storage. Everything overclocked writes stays
+under the runtime home.
+
+## CLI
 
 ```bash
-overclocked --prune
+overclocked                         # one SwiftBar render, with guarded error output
+overclocked --once                  # same one-shot render path
+overclocked --stream --interval 5   # foreground SwiftBar stream loop
+overclocked --dump-state            # raw one-tick detector sample as JSON
+overclocked --dump-state-stable     # debounced/menu-stable session list as JSON
+overclocked --prune                 # prune and downsample old history
 ```
 
-To run daily via cron:
+`--dump-state` skips the menu debounce and is best for detector debugging.
+`--dump-state-stable` uses the same stable-session path as the menu bar.
 
-```
+## History Retention
+
+The history database stores:
+
+- `snapshots`: timestamped active counts and per-tool counts.
+- `sessions`: opened/closed session records with tool, project, pid, and session key.
+
+Pruning deletes snapshots older than one year and downsamples snapshots older than
+90 days to one row per minute using the median active count.
+
+To run pruning daily via cron:
+
+```cron
 0 3 * * * /path/to/.venv/bin/overclocked --prune >> ~/.overclocked/prune.log 2>&1
 ```
 
-## Debug
+## Development
 
 ```bash
-overclocked --once                  # single tick to stdout
-overclocked --stream --interval 5   # foreground stream loop
-overclocked --dump-state            # JSON of current detection state
+ruff check .
+ruff format . --check
+pytest -q
 ```
 
-No network calls. No telemetry. Everything stays in `~/.overclocked/`.
+The code is organized around a few small modules:
+
+- `src/overclocked/detectors.py`: process/transcript detection and session enrichment.
+- `src/overclocked/render.py`: SwiftBar menu rendering.
+- `src/overclocked/storage.py`: SQLite migrations, snapshots, sessions, and pruning.
+- `src/overclocked/aggregates.py`: today's peak/average/sparkline queries.
+- `src/overclocked/config.py`: TOML config and path redaction.
+- `scripts/overclocked.py`: SwiftBar streamable plugin wrapper.
