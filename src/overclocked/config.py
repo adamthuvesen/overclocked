@@ -15,12 +15,12 @@ class Config:
     session_metrics: bool = False
 
     def is_redacted(self, cwd: str | None) -> bool:
-        """Return True if cwd starts with any redact_paths prefix."""
+        """Return True if cwd is inside any configured redaction root."""
         if cwd is None:
             return False
         expanded = Path(cwd).expanduser().as_posix()
         for prefix in self._expanded_prefixes():
-            if expanded.startswith(prefix):
+            if prefix == "/" or expanded == prefix or expanded.startswith(f"{prefix}/"):
                 return True
         return False
 
@@ -58,7 +58,8 @@ def load_config() -> Config:
             session_status = raw_ss
         else:
             print(
-                f"overclocked: warning: {config_path}: session_status must be bool; using default false",
+                f"overclocked: warning: {config_path}: session_status must be bool; "
+                "using default false",
                 file=sys.stderr,
             )
     session_metrics = False
@@ -68,7 +69,8 @@ def load_config() -> Config:
             session_metrics = raw_sm
         else:
             print(
-                f"overclocked: warning: {config_path}: session_metrics must be bool; using default false",
+                f"overclocked: warning: {config_path}: session_metrics must be bool; "
+                "using default false",
                 file=sys.stderr,
             )
     return Config(

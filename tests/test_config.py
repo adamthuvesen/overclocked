@@ -74,6 +74,18 @@ def test_trailing_slash_normalised():
     assert cfg.is_redacted(str(home / "clients" / "foo"))
 
 
+def test_is_redacted_does_not_match_partial_path_segment():
+    cfg = Config(redact_paths=["~/clients/"])
+    home = Path.home()
+    assert not cfg.is_redacted(str(home / "clients-archive" / "acme"))
+    assert not cfg.is_redacted(str(home / "clients2" / "acme"))
+
+
+def test_is_redacted_matches_exact_redaction_root():
+    cfg = Config(redact_paths=["~/clients/"])
+    assert cfg.is_redacted(str(Path.home() / "clients"))
+
+
 def test_legacy_quorum_home_env_var_still_loads_config(tmp_path, monkeypatch):
     monkeypatch.delenv("OVERCLOCKED_HOME", raising=False)
     monkeypatch.setenv("QUORUM_HOME", str(tmp_path))
@@ -104,7 +116,7 @@ def test_session_metrics_invalid_type_warns_and_defaults_false(tmp_path, monkeyp
 def test_session_status_true(tmp_path, monkeypatch):
     monkeypatch.setenv("OVERCLOCKED_HOME", str(tmp_path))
     (tmp_path / "config.toml").write_text(
-        '[display]\nsession_status = true\n',
+        "[display]\nsession_status = true\n",
     )
     cfg = load_config()
     assert cfg.session_status is True
