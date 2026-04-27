@@ -6,7 +6,6 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-
 MAX_LINE_BYTES = 10 * 1024 * 1024
 DEFAULT_TAIL_BYTES = 65536
 DEFAULT_MAX_LINES = 160
@@ -183,7 +182,7 @@ def parse_codex_rollout_tail(
         if val.get("type") == "turn_context":
             idx_last_turn = i
     # Ignore token_count lines from before the last turn_context in this window.
-    # Otherwise after a new turn/session we still showed the previous segment's totals until a new token_count arrived.
+    # Otherwise after a new turn/session, stale totals linger until a new token_count arrives.
     start = idx_last_turn if idx_last_turn >= 0 else 0
     snap = UsageSnapshot()
     for val in parsed[start:]:
@@ -214,9 +213,7 @@ def parse_codex_rollout_tail(
             try:
                 inp = int(src.get("input_tokens") or 0)
                 cr = int(
-                    src.get("cached_input_tokens")
-                    or src.get("cache_read_input_tokens")
-                    or 0,
+                    src.get("cached_input_tokens") or src.get("cache_read_input_tokens") or 0,
                 )
                 cc = int(src.get("cache_creation_input_tokens") or 0)
             except (TypeError, ValueError):

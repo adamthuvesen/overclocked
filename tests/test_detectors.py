@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 import time
+from datetime import UTC
 from pathlib import Path
 
 from overclocked.config import Config
@@ -372,9 +373,9 @@ def test_codex_app_session_inactive_stale(tmp_path):
 
 
 def _iso_now_z() -> str:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
 def _make_codex_session(
@@ -436,12 +437,12 @@ def test_codex_session_meta_found_after_non_meta_preamble(tmp_path, monkeypatch)
         "type": "session_meta",
         "payload": {"originator": "Codex Desktop", "cwd": "/Users/me/proj"},
     }
-    recent = json.dumps(
-        {"timestamp": _iso_now_z(), "type": "assistant", "payload": {}}
-    )
+    recent = json.dumps({"timestamp": _iso_now_z(), "type": "assistant", "payload": {}})
     f.write_text(
-        json.dumps({"type": "event", "payload": {}}) + "\n"
-        + json.dumps(meta) + "\n"
+        json.dumps({"type": "event", "payload": {}})
+        + "\n"
+        + json.dumps(meta)
+        + "\n"
         + recent
         + "\n"
     )
@@ -563,7 +564,10 @@ def test_list_claude_sessions_tty_filter(monkeypatch):
     monkeypatch.setattr("overclocked.detectors._claude_pgrep_all", lambda: [1001, 1002])
     monkeypatch.setattr("overclocked.detectors._has_tty", lambda pid: pid == 1001)
     monkeypatch.setattr("overclocked.detectors.is_descendant_of", lambda pid, names: False)
-    monkeypatch.setattr("overclocked.detectors.claude_cli_session_is_active", lambda pid: pid == 1001)
+    monkeypatch.setattr(
+        "overclocked.detectors.claude_cli_session_is_active",
+        lambda pid: pid == 1001,
+    )
     monkeypatch.setattr("overclocked.detectors.list_claude_app_sessions", lambda: [])
     sessions = list_claude_sessions()
     assert len(sessions) == 1
@@ -593,7 +597,10 @@ def test_list_claude_tty_hides_when_project_stale(tmp_path, monkeypatch):
     monkeypatch.setattr("overclocked.detectors._has_tty", lambda pid: True)
     monkeypatch.setattr("overclocked.detectors.is_descendant_of", lambda pid, names: False)
     monkeypatch.setattr("overclocked.detectors._CLAUDE_PROJECTS_DIR", proj_dir.parent)
-    monkeypatch.setattr("overclocked.detectors._resolve_cwd_cached", lambda pid: "/Users/me/dev/proj")
+    monkeypatch.setattr(
+        "overclocked.detectors._resolve_cwd_cached",
+        lambda pid: "/Users/me/dev/proj",
+    )
     monkeypatch.setattr("overclocked.detectors.list_claude_app_sessions", lambda: [])
     sessions = list_claude_sessions()
     assert sessions == []
@@ -1067,7 +1074,13 @@ def test_enrich_session_metrics_fills_from_transcript(monkeypatch, tmp_path):
 
     def fake_parse(path: Path):
         assert path == p
-        return UsageSnapshot(model="claude-3-opus", input_tokens=3, output_tokens=4, cache_read=0, cache_create=0)
+        return UsageSnapshot(
+            model="claude-3-opus",
+            input_tokens=3,
+            output_tokens=4,
+            cache_read=0,
+            cache_create=0,
+        )
 
     monkeypatch.setattr(d, "parse_claude_jsonl_tail", fake_parse)
     s = Session(tool="claude", pid=1, cwd="/a", project="p", transcript_path=p)

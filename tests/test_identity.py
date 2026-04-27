@@ -45,12 +45,7 @@ def test_project_label_multiple_prefixes():
 def test_project_label_claude_worktree_uses_repo_name():
     cfg = Config()
     cwd = str(
-        Path.home()
-        / "dev"
-        / "my-project"
-        / ".claude"
-        / "worktrees"
-        / "thirsty-lichterman-918d5e"
+        Path.home() / "dev" / "my-project" / ".claude" / "worktrees" / "thirsty-lichterman-918d5e"
     )
     assert project_label(cwd, cfg) == "my-project"
 

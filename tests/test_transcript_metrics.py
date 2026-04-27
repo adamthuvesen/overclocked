@@ -163,7 +163,9 @@ def test_parse_codex_cache_read_field_variant(tmp_path: Path) -> None:
     assert snap.cache_read == 99
 
 
-def test_parse_codex_rollout_tail_drops_stale_token_counts_after_turn_context(tmp_path: Path) -> None:
+def test_parse_codex_rollout_tail_drops_stale_token_counts_after_turn_context(
+    tmp_path: Path,
+) -> None:
     """After a new turn_context, ignore older token_count rows still in the tail window."""
     p = tmp_path / "rollout.jsonl"
     _write_jsonl(
@@ -190,7 +192,7 @@ def test_parse_codex_rollout_tail_drops_stale_token_counts_after_turn_context(tm
 
 
 def test_parse_codex_rollout_tail_prefers_last_token_usage_over_total(tmp_path: Path) -> None:
-    """last_token_usage (current-turn context) takes priority over total_token_usage (cumulative)."""
+    """Prefer last_token_usage (current turn) over total_token_usage (cumulative)."""
     p = tmp_path / "rollout.jsonl"
     _write_jsonl(
         p,

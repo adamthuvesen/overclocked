@@ -13,7 +13,11 @@ from pathlib import Path
 from overclocked._subprocess import _safe_check_output
 from overclocked.config import Config
 from overclocked.identity import project_label, resolve_cwd, resolve_cwds_batch
-from overclocked.transcript_metrics import parse_claude_jsonl_tail, parse_claude_project_dir, parse_codex_rollout_tail
+from overclocked.transcript_metrics import (
+    parse_claude_jsonl_tail,
+    parse_claude_project_dir,
+    parse_codex_rollout_tail,
+)
 from overclocked.transcript_time import jsonl_tail_timestamp_result, jsonl_transcript_recent
 
 
