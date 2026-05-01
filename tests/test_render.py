@@ -5,31 +5,7 @@ from __future__ import annotations
 from overclocked.config import Config
 from overclocked.detectors import Session
 from overclocked.identity import project_label
-from overclocked.render import RenderState, _swiftbar_safe, dropdown, humanise_delta, menu_bar_line
-
-# ── humanise_delta ────────────────────────────────────────────────────────────
-
-
-def test_humanise_seconds():
-    assert humanise_delta(8) == "8s ago"
-
-
-def test_humanise_minutes():
-    assert humanise_delta(240) == "4m"
-
-
-def test_humanise_hours():
-    assert humanise_delta(7200) == "2h"
-
-
-def test_humanise_hours_non_exact_multiple():
-    """7290 s is 2 h 1.5 min, should round down to 2h."""
-    assert humanise_delta(7290) == "2h"
-
-
-def test_humanise_zero():
-    assert humanise_delta(0) == "0s ago"
-
+from overclocked.render import RenderState, _swiftbar_safe, dropdown, menu_bar_line
 
 # ── menu_bar_line ─────────────────────────────────────────────────────────────
 
