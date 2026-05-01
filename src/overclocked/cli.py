@@ -23,7 +23,6 @@ from overclocked.storage import (
     connect,
     dedupe_sessions_by_tool_pid,
     prune,
-    reconcile,
     write_snapshot,
 )
 
@@ -81,7 +80,6 @@ def _render_once(
     active = len(sessions)
 
     write_snapshot(conn, active=active, by_tool=by_tool)
-    reconcile(conn, sessions)
 
     state = RenderState(sessions=sessions, conn=conn, config=config)
     return dropdown(state), k_curr, sessions
@@ -131,7 +129,6 @@ def _run_once(config: Config) -> None:
         active = len(sessions)
 
         write_snapshot(conn, active=active, by_tool=by_tool)
-        reconcile(conn, sessions)
 
         state = RenderState(sessions=sessions, conn=conn, config=config)
         print(dropdown(state))

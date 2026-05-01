@@ -1,4 +1,4 @@
-"""SQLite persistence for session snapshots and session events."""
+"""SQLite persistence for session snapshots."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ from collections.abc import Callable
 from pathlib import Path
 
 from overclocked.detectors import Session
-from overclocked.identity import session_key
 from overclocked.runtime_home import runtime_home
 
 # ── migrations ────────────────────────────────────────────────────────────────
@@ -79,10 +78,17 @@ def _migration_v3(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_ts ON snapshots(ts)")
 
 
+def _migration_v4(conn: sqlite3.Connection) -> None:
+    """Drop the unused ``sessions`` table and its index."""
+    conn.execute("DROP INDEX IF EXISTS idx_sessions_open")
+    conn.execute("DROP TABLE IF EXISTS sessions")
+
+
 _MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
     _migration_v1,
     _migration_v2,
     _migration_v3,
+    _migration_v4,
 ]
 
 
@@ -143,64 +149,6 @@ def write_snapshot(
         (ts, active, json.dumps(by_tool)),
     )
     conn.commit()
-
-
-def open_session(
-    conn: sqlite3.Connection,
-    tool: str,
-    project: str | None,
-    pid: int,
-    key: str | None = None,
-) -> int:
-    """Insert a new session row and return its id. Caller is responsible for commit."""
-    ts = int(time.time())
-    cur = conn.execute(
-        "INSERT INTO sessions (tool, project, started_at, pid, session_key) VALUES (?,?,?,?,?)",
-        (tool, project, ts, pid, key),
-    )
-    return cur.lastrowid  # type: ignore[return-value]
-
-
-def close_session(conn: sqlite3.Connection, session_id: int) -> None:
-    """Set ended_at for the given session. Caller is responsible for commit."""
-    conn.execute(
-        "UPDATE sessions SET ended_at = ? WHERE id = ?",
-        (int(time.time()), session_id),
-    )
-
-
-def reconcile(
-    conn: sqlite3.Connection,
-    current_sessions: list[Session],
-) -> None:
-    """Open new sessions and close disappeared ones in a single atomic transaction."""
-    current_sessions = dedupe_sessions_by_tool_pid(current_sessions)
-    with conn:
-        # Build current map using already-resolved Session.cwd and Session.project
-        current_map: dict[tuple[str, int], tuple[str | None, str | None]] = {}
-        for s in current_sessions:
-            key = session_key(s.tool, s.cwd, s.pid)
-            current_map[(s.tool, s.pid)] = (key, s.project)
-
-        # Fetch all open sessions from the DB (ended_at IS NULL)
-        rows = conn.execute(
-            "SELECT id, tool, pid, session_key FROM sessions WHERE ended_at IS NULL"
-        ).fetchall()
-        open_pids: dict[tuple[str, int], int] = {
-            (row["tool"], row["pid"]): row["id"] for row in rows
-        }
-
-        # Close sessions no longer present
-        current_pids = set(current_map.keys())
-        for (tool, pid), db_id in list(open_pids.items()):
-            if (tool, pid) not in current_pids:
-                close_session(conn, db_id)
-
-        # Open new sessions not yet in the DB
-        for s in current_sessions:
-            if (s.tool, s.pid) not in open_pids:
-                key = session_key(s.tool, s.cwd, s.pid)
-                open_session(conn, s.tool, s.project, s.pid, key)
 
 
 def prune(conn: sqlite3.Connection) -> None:
