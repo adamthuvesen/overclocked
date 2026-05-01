@@ -118,21 +118,6 @@ def _sessions_for_tool_ordered(sessions: list[Session], tool: str) -> list[Sessi
     return rows
 
 
-# ── public helpers ────────────────────────────────────────────────────────────
-
-
-def humanise_delta(seconds: float) -> str:
-    """Return a humanised time delta string."""
-    seconds = max(0, int(seconds))
-    if seconds < 60:
-        return f"{seconds}s ago"
-    minutes = seconds // 60
-    if minutes < 60:
-        return f"{minutes}m"
-    hours = minutes // 60
-    return f"{hours}h"
-
-
 def menu_bar_line(active: int) -> str:
     """Return the compact menu bar string."""
     return f"👾  {active}"

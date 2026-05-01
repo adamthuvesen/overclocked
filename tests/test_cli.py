@@ -47,26 +47,18 @@ def test_cli_guard_writes_error_log(tmp_path, monkeypatch):
 def test_cli_dump_state_bypasses_guard(tmp_path, monkeypatch):
     """--dump-state lets exceptions propagate (no guard)."""
     monkeypatch.setenv("OVERCLOCKED_HOME", str(tmp_path))
-    monkeypatch.setattr(
-        "overclocked.cli.Sampler",
-        lambda config: (_ for _ in ()).throw(RuntimeError("boom")),
-    )
+
+    def boom(config):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("overclocked.cli.tick", boom)
     with pytest.raises(RuntimeError, match="boom"):
         main(["--dump-state"])
 
 
 def test_cli_dump_state_uses_active_schema(monkeypatch, capsys):
-    class FakeSampler:
-        def __init__(self, config):
-            self._sessions = [Session(tool="claude", pid=1, cwd="/dev/proj", project="proj")]
-
-        def tick(self):
-            return None
-
-        def raw_sessions(self):
-            return self._sessions
-
-    monkeypatch.setattr("overclocked.cli.Sampler", FakeSampler)
+    sessions = [Session(tool="claude", pid=1, cwd="/dev/proj", project="proj")]
+    monkeypatch.setattr("overclocked.cli.tick", lambda config: sessions)
     main(["--dump-state"])
     captured = capsys.readouterr()
     assert '"active": 1' in captured.out
@@ -75,28 +67,19 @@ def test_cli_dump_state_uses_active_schema(monkeypatch, capsys):
 
 
 def test_cli_dump_state_includes_session_metrics(monkeypatch, capsys):
-    class FakeSampler:
-        def __init__(self, config):
-            self._sessions = [
-                Session(
-                    tool="claude",
-                    pid=1,
-                    cwd="/dev/proj",
-                    project="proj",
-                    model="claude-opus",
-                    input_tokens=8,
-                    output_tokens=2,
-                    cache_read=100,
-                ),
-            ]
-
-        def tick(self):
-            return None
-
-        def raw_sessions(self):
-            return self._sessions
-
-    monkeypatch.setattr("overclocked.cli.Sampler", FakeSampler)
+    sessions = [
+        Session(
+            tool="claude",
+            pid=1,
+            cwd="/dev/proj",
+            project="proj",
+            model="claude-opus",
+            input_tokens=8,
+            output_tokens=2,
+            cache_read=100,
+        ),
+    ]
+    monkeypatch.setattr("overclocked.cli.tick", lambda config: sessions)
     main(["--dump-state"])
     out = capsys.readouterr().out
     assert '"model": "claude-opus"' in out

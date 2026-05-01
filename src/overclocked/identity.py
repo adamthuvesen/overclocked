@@ -93,14 +93,3 @@ def project_label(cwd: str | None, config: Config) -> str | None:
     if worktree_name is not None:
         return worktree_name
     return path.name or None
-
-
-def session_key(tool: str, cwd: str | None, pid: int) -> str:
-    """Return a stable identity string for a session.
-
-    Uses (tool, cwd) when cwd is available so the key survives minor PID
-    changes (e.g. shell restart in same directory). Falls back to pid.
-    """
-    if cwd:
-        return f"{tool}:{cwd}"
-    return f"{tool}:pid:{pid}"

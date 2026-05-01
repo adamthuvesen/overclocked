@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from overclocked.config import Config
-from overclocked.identity import _parse_lsof_fn_cwd_blocks, project_label, session_key
+from overclocked.identity import _parse_lsof_fn_cwd_blocks, project_label
 
 
 def test_parse_lsof_fn_cwd_blocks_multi_pid():
@@ -54,14 +54,3 @@ def test_project_label_codex_worktree_uses_repo_name():
     cfg = Config()
     cwd = str(Path.home() / "dev" / "my-other-project" / ".codex" / "worktrees" / "abc123")
     assert project_label(cwd, cfg) == "my-other-project"
-
-
-def test_session_key_with_cwd():
-    key = session_key("claude", "/Users/adam/dev/overclocked", 12345)
-    assert key == "claude:/Users/adam/dev/overclocked"
-    assert "12345" not in key
-
-
-def test_session_key_without_cwd():
-    key = session_key("codex", None, 42)
-    assert key == "codex:pid:42"

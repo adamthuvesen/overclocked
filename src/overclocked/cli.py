@@ -12,10 +12,10 @@ import sqlite3
 import sys
 import time
 import traceback
-from datetime import datetime
+from datetime import UTC, datetime
 
 from overclocked.config import Config, load_config
-from overclocked.detectors import Sampler, Session, stable_sessions_from_keys
+from overclocked.detectors import Session, raw_session_keys, stable_sessions_from_keys, tick
 from overclocked.render import RenderState, dropdown
 from overclocked.runtime_home import runtime_home
 from overclocked.sampler_state import load_raw_session_keys, save_raw_session_keys
@@ -23,7 +23,6 @@ from overclocked.storage import (
     connect,
     dedupe_sessions_by_tool_pid,
     prune,
-    reconcile,
     write_snapshot,
 )
 
@@ -62,18 +61,15 @@ def _render_once(
 ) -> tuple[str, frozenset[tuple[str, int]], list[Session]]:
     """Run one sample + render cycle.
 
-    Returns (swiftbar_output, current_raw_keys, stable_sessions).
-
-    On a cold start (empty ``prev_raw_keys``) we use the current sample as its
-    own baseline so the first frame is non-empty; subsequent calls debounce
-    against the previous tick's raw keys held by the caller.
+    Returns (swiftbar_output, current_raw_keys, stable_sessions). Stable
+    sessions are the intersection of the current sample with ``prev_raw_keys``;
+    on a true cold start (``prev_raw_keys`` empty) the first frame is empty by
+    design — the caller is expected to feed the returned keys back in for the
+    next tick.
     """
-    sampler = Sampler(config)
-    sampler.tick()
-    curr = sampler.raw_sessions()
-    k_curr = Sampler.raw_session_keys(curr)
-    baseline = prev_raw_keys if prev_raw_keys else k_curr
-    sessions = dedupe_sessions_by_tool_pid(stable_sessions_from_keys(curr, baseline))
+    curr = tick(config)
+    k_curr = raw_session_keys(curr)
+    sessions = dedupe_sessions_by_tool_pid(stable_sessions_from_keys(curr, prev_raw_keys))
 
     by_tool: dict[str, int] = {}
     for s in sessions:
@@ -81,29 +77,9 @@ def _render_once(
     active = len(sessions)
 
     write_snapshot(conn, active=active, by_tool=by_tool)
-    reconcile(conn, sessions)
 
     state = RenderState(sessions=sessions, conn=conn, config=config)
     return dropdown(state), k_curr, sessions
-
-
-def _sample_stable_sessions(config) -> list:
-    """One-shot path used by --once: load persisted prev keys, tick, persist."""
-    persisted = load_raw_session_keys()
-    sampler = Sampler(config)
-    if persisted is None:
-        sampler.tick()
-        k_prev = Sampler.raw_session_keys(sampler.raw_sessions())
-        sampler.tick()
-        curr = sampler.raw_sessions()
-        k_curr = Sampler.raw_session_keys(curr)
-        save_raw_session_keys(k_curr)
-        return stable_sessions_from_keys(curr, k_prev)
-    sampler.tick()
-    curr = sampler.raw_sessions()
-    k_curr = Sampler.raw_session_keys(curr)
-    save_raw_session_keys(k_curr)
-    return stable_sessions_from_keys(curr, persisted)
 
 
 def _log_exception(exc: BaseException) -> None:
@@ -111,7 +87,7 @@ def _log_exception(exc: BaseException) -> None:
     try:
         error_log = runtime_home() / "error.log"
         error_log.parent.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now().isoformat(timespec="seconds")
+        ts = datetime.now(UTC).isoformat(timespec="seconds")
         first_line = str(exc).splitlines()[0] if str(exc) else type(exc).__name__
         tb = traceback.format_exc()
         with error_log.open("a") as f:
@@ -121,20 +97,31 @@ def _log_exception(exc: BaseException) -> None:
 
 
 def _run_once(config: Config) -> None:
-    """Single SwiftBar render — used by --once and as the inner body of --stream."""
+    """Single SwiftBar render — used by --once.
+
+    On cold start (no persisted keys) does a bare priming tick first so the
+    rendered tick has a real debounce baseline; otherwise debounces against
+    the persisted keys from the previous run. Only the rendered tick writes
+    a snapshot.
+    """
+    persisted = load_raw_session_keys()
+    k_prev = raw_session_keys(tick(config)) if persisted is None else persisted
     with contextlib.closing(connect()) as conn:
-        sessions = dedupe_sessions_by_tool_pid(_sample_stable_sessions(config))
+        output, k_curr, _ = _render_once(config, conn, k_prev)
+    save_raw_session_keys(k_curr)
+    print(output)
 
-        by_tool: dict[str, int] = {}
-        for s in sessions:
-            by_tool[s.tool] = by_tool.get(s.tool, 0) + 1
-        active = len(sessions)
 
-        write_snapshot(conn, active=active, by_tool=by_tool)
-        reconcile(conn, sessions)
-
-        state = RenderState(sessions=sessions, conn=conn, config=config)
-        print(dropdown(state))
+def _dump_state_stable_sessions(config) -> list[Session]:
+    """One-shot debounced sample for ``--dump-state-stable``."""
+    persisted = load_raw_session_keys()
+    if persisted is None:
+        k_prev = raw_session_keys(tick(config))
+    else:
+        k_prev = persisted
+    curr = tick(config)
+    save_raw_session_keys(raw_session_keys(curr))
+    return stable_sessions_from_keys(curr, k_prev)
 
 
 def _run_stream(config: Config, interval: float) -> None:
@@ -176,7 +163,12 @@ def _run_stream(config: Config, interval: float) -> None:
         return bool(w)
 
     parent_pid = os.getppid()
-    prev: frozenset[tuple[str, int]] = load_raw_session_keys() or frozenset()
+    persisted = load_raw_session_keys()
+    # Cold start: prime the debounce baseline with one bare tick so the first
+    # rendered frame already has a real prev set (matches --once behavior).
+    prev: frozenset[tuple[str, int]] = (
+        persisted if persisted is not None else raw_session_keys(tick(config))
+    )
 
     with contextlib.closing(connect()) as conn:
         while not stop["flag"]:
@@ -267,14 +259,12 @@ def main(argv: list[str] | None = None) -> None:
     config = load_config()
 
     if args.dump_state_stable:
-        sessions = dedupe_sessions_by_tool_pid(_sample_stable_sessions(config))
+        sessions = dedupe_sessions_by_tool_pid(_dump_state_stable_sessions(config))
         print(json.dumps(_build_state_dict(sessions), indent=2))
         return
 
     if args.dump_state:
-        sampler = Sampler(config)
-        sampler.tick()
-        print(json.dumps(_build_state_dict(sampler.raw_sessions()), indent=2))
+        print(json.dumps(_build_state_dict(tick(config)), indent=2))
         return
 
     if args.stream:

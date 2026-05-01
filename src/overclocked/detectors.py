@@ -56,7 +56,7 @@ class CodexTickData:
     desktop_rows: list[tuple[Path, float, str | None]]
 
 
-# Process table for current tick (None → fall back to per-pid ps)
+# Process table for current tick (None → ps axo failed, treat as no processes)
 _ps_table: dict[int, PsRow] | None = None
 _codex_tick_data: CodexTickData | None = None
 
@@ -123,95 +123,45 @@ def _pgrep(pattern: str) -> list[int]:
 
 
 def _has_tty(pid: int) -> bool:
-    if _ps_table and pid in _ps_table:
-        tty = _ps_table[pid].tty.strip()
-        return bool(tty) and tty != "??"
-    out = _safe_check_output(["ps", "-p", str(pid), "-o", "tty="])
-    if out is None:
+    if not _ps_table or pid not in _ps_table:
         return False
-    stripped = out.strip()
-    return bool(stripped) and stripped != "??"
+    tty = _ps_table[pid].tty.strip()
+    return bool(tty) and tty != "??"
 
 
 def _argv(pid: int) -> str:
-    if _ps_table and pid in _ps_table:
-        return _ps_table[pid].command
-    out = _safe_check_output(["ps", "-p", str(pid), "-o", "command="])
-    return out.strip() if out is not None else ""
+    if not _ps_table or pid not in _ps_table:
+        return ""
+    return _ps_table[pid].command
 
 
 def _ppid(pid: int) -> int | None:
-    if _ps_table and pid in _ps_table:
-        return _ps_table[pid].ppid
-    out = _safe_check_output(["ps", "-p", str(pid), "-o", "ppid="])
-    if out is None:
+    if not _ps_table or pid not in _ps_table:
         return None
-    try:
-        return int(out.strip())
-    except ValueError:
-        return None
+    return _ps_table[pid].ppid
 
 
 def _cpu_percent(pid: int) -> float:
-    if _ps_table and pid in _ps_table:
-        return _ps_table[pid].pcpu
-    out = _safe_check_output(["ps", "-p", str(pid), "-o", "%cpu="])
-    if out is None:
+    if not _ps_table or pid not in _ps_table:
         return 0.0
-    try:
-        return float(out.strip())
-    except ValueError:
-        return 0.0
-
-
-def _ps_info(pid: int) -> tuple[str, int] | None:
-    if _ps_table and pid in _ps_table:
-        row = _ps_table[pid]
-        return row.command, row.ppid
-    out = _safe_check_output(["ps", "-p", str(pid), "-o", "ppid=,command="])
-    if out is None:
-        return None
-    stripped = out.strip()
-    if not stripped:
-        return None
-    parts = stripped.split(None, 1)
-    if len(parts) < 2:
-        return None
-    try:
-        return parts[1], int(parts[0])
-    except ValueError:
-        return None
+    return _ps_table[pid].pcpu
 
 
 def is_descendant_of(pid: int, names: list[str]) -> bool:
     """Return True if any ancestor process has a name matching names."""
-    if _ps_table:
-        visited: set[int] = set()
-        current = pid
-        while current and current not in visited:
-            visited.add(current)
-            row = _ps_table.get(current)
-            if row is None:
-                break
-            if any(name.lower() in row.command.lower() for name in names):
-                return True
-            parent = row.ppid
-            if parent <= 1 or parent == current:
-                break
-            current = parent
+    if not _ps_table:
         return False
-
-    visited = set()
+    visited: set[int] = set()
     current = pid
     while current and current not in visited:
         visited.add(current)
-        info = _ps_info(current)
-        if info is None:
+        row = _ps_table.get(current)
+        if row is None:
             break
-        cmd, parent = info
-        if any(name.lower() in cmd.lower() for name in names):
+        if any(name.lower() in row.command.lower() for name in names):
             return True
-        if parent is None or parent == current or parent <= 1:
+        parent = row.ppid
+        if parent <= 1 or parent == current:
             break
         current = parent
     return False
@@ -581,7 +531,7 @@ def _find_claude_session_file_for_pid(sessions_dir: Path, pid: int) -> Path | No
     return None
 
 
-def _claude_session_meta_from_session_file(path: Path) -> tuple[str | None, str | None]:
+def _claude_session_meta_from_disk(path: Path) -> tuple[str | None, str | None]:
     """Return ``(session_id, cwd)`` from a Claude Code ``sessions/*.json`` file."""
     try:
         data: object = json.loads(path.read_text(encoding="utf-8"))
@@ -605,7 +555,7 @@ def _find_claude_transcript_jsonl_for_tty(pid: int, cwd: str) -> Path | None:
     session_json = _find_claude_session_file_for_pid(sessions_dir, pid)
     if session_json is None:
         return None
-    session_id, file_cwd = _claude_session_meta_from_session_file(session_json)
+    session_id, file_cwd = _claude_session_meta_from_disk(session_json)
     if not session_id:
         return None
     if file_cwd is not None:
@@ -1223,41 +1173,26 @@ def list_all_sessions() -> list[Session]:
     )
 
 
-class Sampler:
-    """Sample sessions from the OS; raw result in ``_curr`` after ``tick()``."""
+def raw_session_keys(sessions: list[Session]) -> frozenset[tuple[str, int]]:
+    return frozenset((s.tool, s.pid) for s in sessions)
 
-    def __init__(self, config: Config) -> None:
-        self._config = config
-        self._curr: list[Session] | None = None
-        self.tick_id: int = 0
 
-    @staticmethod
-    def raw_session_keys(sessions: list[Session]) -> frozenset[tuple[str, int]]:
-        return frozenset((s.tool, s.pid) for s in sessions)
-
-    def tick(self) -> None:
-        """Sample current sessions from the OS."""
-        self.tick_id += 1
-        _begin_tick()
-        raw = list_all_sessions()
-        # Synthetic session PIDs are fake; skip lsof batch for them.
-        pids_needing = sorted({s.pid for s in raw if s.cwd is None and not s.synthetic})
-        if pids_needing:
-            for pid, cwd in resolve_cwds_batch(pids_needing).items():
-                _cwd_cache[pid] = cwd
-        for s in raw:
-            if s.cwd is None:
-                s.cwd = _cwd_cache.get(s.pid)
-            if s.project is None and s.cwd is not None:
-                s.project = project_label(s.cwd, self._config)
-        _enrich_session_metrics(raw, self._config)
-        self._curr = raw
-
-    def raw_sessions(self) -> list[Session]:
-        """Return the last raw sample (copy)."""
-        if self._curr is None:
-            return []
-        return list(self._curr)
+def tick(config: Config) -> list[Session]:
+    """Sample current sessions from the OS and return the enriched raw list."""
+    _begin_tick()
+    raw = list_all_sessions()
+    # Synthetic session PIDs are fake; skip lsof batch for them.
+    pids_needing = sorted({s.pid for s in raw if s.cwd is None and not s.synthetic})
+    if pids_needing:
+        for pid, cwd in resolve_cwds_batch(pids_needing).items():
+            _cwd_cache[pid] = cwd
+    for s in raw:
+        if s.cwd is None:
+            s.cwd = _cwd_cache.get(s.pid)
+        if s.project is None and s.cwd is not None:
+            s.project = project_label(s.cwd, config)
+    _enrich_session_metrics(raw, config)
+    return raw
 
 
 def stable_sessions_from_keys(
@@ -1265,5 +1200,5 @@ def stable_sessions_from_keys(
     persisted_prev: frozenset[tuple[str, int]],
 ) -> list[Session]:
     """Intersection of persisted raw keys with current sessions (debounced stable set)."""
-    stable = persisted_prev & Sampler.raw_session_keys(sessions)
+    stable = persisted_prev & raw_session_keys(sessions)
     return [s for s in sessions if (s.tool, s.pid) in stable]
