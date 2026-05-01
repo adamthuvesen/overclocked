@@ -15,7 +15,7 @@ import traceback
 from datetime import datetime
 
 from overclocked.config import Config, load_config
-from overclocked.detectors import Sampler, Session, stable_sessions_from_keys
+from overclocked.detectors import Session, raw_session_keys, stable_sessions_from_keys, tick
 from overclocked.render import RenderState, dropdown
 from overclocked.runtime_home import runtime_home
 from overclocked.sampler_state import load_raw_session_keys, save_raw_session_keys
@@ -67,10 +67,8 @@ def _render_once(
     own baseline so the first frame is non-empty; subsequent calls debounce
     against the previous tick's raw keys held by the caller.
     """
-    sampler = Sampler(config)
-    sampler.tick()
-    curr = sampler.raw_sessions()
-    k_curr = Sampler.raw_session_keys(curr)
+    curr = tick(config)
+    k_curr = raw_session_keys(curr)
     baseline = prev_raw_keys if prev_raw_keys else k_curr
     sessions = dedupe_sessions_by_tool_pid(stable_sessions_from_keys(curr, baseline))
 
@@ -88,18 +86,14 @@ def _render_once(
 def _sample_stable_sessions(config) -> list:
     """One-shot path used by --once: load persisted prev keys, tick, persist."""
     persisted = load_raw_session_keys()
-    sampler = Sampler(config)
     if persisted is None:
-        sampler.tick()
-        k_prev = Sampler.raw_session_keys(sampler.raw_sessions())
-        sampler.tick()
-        curr = sampler.raw_sessions()
-        k_curr = Sampler.raw_session_keys(curr)
+        k_prev = raw_session_keys(tick(config))
+        curr = tick(config)
+        k_curr = raw_session_keys(curr)
         save_raw_session_keys(k_curr)
         return stable_sessions_from_keys(curr, k_prev)
-    sampler.tick()
-    curr = sampler.raw_sessions()
-    k_curr = Sampler.raw_session_keys(curr)
+    curr = tick(config)
+    k_curr = raw_session_keys(curr)
     save_raw_session_keys(k_curr)
     return stable_sessions_from_keys(curr, persisted)
 
@@ -269,9 +263,7 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     if args.dump_state:
-        sampler = Sampler(config)
-        sampler.tick()
-        print(json.dumps(_build_state_dict(sampler.raw_sessions()), indent=2))
+        print(json.dumps(_build_state_dict(tick(config)), indent=2))
         return
 
     if args.stream:

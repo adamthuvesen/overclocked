@@ -12,7 +12,6 @@ from overclocked.config import Config
 from overclocked.detectors import (
     CodexTickData,
     PsRow,
-    Sampler,
     Session,
     _claude_pgrep_all,
     _cursor_project_workspace_cwd,
@@ -29,7 +28,9 @@ from overclocked.detectors import (
     list_codex_sessions,
     list_cursor_agent_sessions,
     list_cursor_editor_windows,
+    raw_session_keys,
     stable_sessions_from_keys,
+    tick,
 )
 
 # ── is_descendant_of ──────────────────────────────────────────────────────────
@@ -158,8 +159,8 @@ def test_safe_check_output_timeout(monkeypatch):
     assert _safe_check_output(["nosuchbin"]) is None
 
 
-def test_sampler_survives_pgrep_file_not_found(tmp_path, monkeypatch):
-    """Sampler returns [] rather than crashing when pgrep is missing."""
+def test_tick_survives_pgrep_file_not_found(tmp_path, monkeypatch):
+    """tick() returns [] rather than crashing when pgrep is missing."""
     monkeypatch.setattr(
         "overclocked.detectors._safe_check_output",
         lambda *a, **kw: None,
@@ -167,11 +168,10 @@ def test_sampler_survives_pgrep_file_not_found(tmp_path, monkeypatch):
     monkeypatch.setattr("overclocked.detectors._CLAUDE_PROJECTS_DIR", tmp_path / "claude")
     monkeypatch.setattr("overclocked.detectors._CURSOR_PROJECTS_DIR", tmp_path / "cursor")
     monkeypatch.setattr("overclocked.detectors._CODEX_SESSIONS_DIR", tmp_path / "codex")
-    s = Sampler(Config())
-    s.tick()
-    k1 = Sampler.raw_session_keys(s.raw_sessions())
-    s.tick()
-    assert stable_sessions_from_keys(s.raw_sessions(), k1) == []
+    first = tick(Config())
+    k1 = raw_session_keys(first)
+    second = tick(Config())
+    assert stable_sessions_from_keys(second, k1) == []
 
 
 # ── cursor_agent_session_is_active ────────────────────────────────────────────
@@ -847,32 +847,28 @@ def test_claude_cli_inactive_stale_agent_transcript(tmp_path, monkeypatch):
     assert list_claude_sessions() == []
 
 
-# ── Sampler (debounce) ────────────────────────────────────────────────────────
+# ── tick / debounce ───────────────────────────────────────────────────────────
 
 
-def test_sampler_first_tick_returns_nothing(monkeypatch):
+def test_tick_first_tick_returns_nothing(monkeypatch):
     monkeypatch.setattr(
         "overclocked.detectors.list_all_sessions", lambda: [Session(tool="claude", pid=1)]
     )
-    s = Sampler(Config())
-    s.tick()
-    assert stable_sessions_from_keys(s.raw_sessions(), frozenset()) == []
+    first = tick(Config())
+    assert stable_sessions_from_keys(first, frozenset()) == []
 
 
-def test_sampler_two_ticks_confirms(monkeypatch):
+def test_tick_two_ticks_confirms(monkeypatch):
     monkeypatch.setattr(
         "overclocked.detectors.list_all_sessions", lambda: [Session(tool="claude", pid=1)]
     )
-    s = Sampler(Config())
-    s.tick()
-    k1 = Sampler.raw_session_keys(s.raw_sessions())
-    s.tick()
-    sessions = stable_sessions_from_keys(s.raw_sessions(), k1)
+    k1 = raw_session_keys(tick(Config()))
+    sessions = stable_sessions_from_keys(tick(Config()), k1)
     assert len(sessions) == 1
     assert sessions[0].tool == "claude"
 
 
-def test_sampler_flicker_not_propagated(monkeypatch):
+def test_tick_flicker_not_propagated(monkeypatch):
     """A session appearing in tick 1 but not tick 2 is not emitted after tick 2."""
     call_count = {"n": 0}
 
@@ -883,14 +879,11 @@ def test_sampler_flicker_not_propagated(monkeypatch):
         return []
 
     monkeypatch.setattr("overclocked.detectors.list_all_sessions", fake_list)
-    s = Sampler(Config())
-    s.tick()
-    k1 = Sampler.raw_session_keys(s.raw_sessions())
-    s.tick()
-    assert stable_sessions_from_keys(s.raw_sessions(), k1) == []
+    k1 = raw_session_keys(tick(Config()))
+    assert stable_sessions_from_keys(tick(Config()), k1) == []
 
 
-def test_sampler_stable_addition(monkeypatch):
+def test_tick_stable_addition(monkeypatch):
     """Session seen in tick N and N+1 but not N-1 is emitted after tick N+1."""
     call_count = {"n": 0}
 
@@ -901,14 +894,11 @@ def test_sampler_stable_addition(monkeypatch):
         return []
 
     monkeypatch.setattr("overclocked.detectors.list_all_sessions", fake_list)
-    s = Sampler(Config())
-    s.tick()
-    k1 = Sampler.raw_session_keys(s.raw_sessions())
-    s.tick()
-    assert stable_sessions_from_keys(s.raw_sessions(), k1) == []
-    k2 = Sampler.raw_session_keys(s.raw_sessions())
-    s.tick()
-    assert len(stable_sessions_from_keys(s.raw_sessions(), k2)) == 1
+    k1 = raw_session_keys(tick(Config()))
+    second = tick(Config())
+    assert stable_sessions_from_keys(second, k1) == []
+    k2 = raw_session_keys(second)
+    assert len(stable_sessions_from_keys(tick(Config()), k2)) == 1
 
 
 # ── session status (abtop-style) ──────────────────────────────────────────────

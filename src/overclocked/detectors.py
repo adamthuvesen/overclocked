@@ -1180,41 +1180,26 @@ def list_all_sessions() -> list[Session]:
     )
 
 
-class Sampler:
-    """Sample sessions from the OS; raw result in ``_curr`` after ``tick()``."""
+def raw_session_keys(sessions: list[Session]) -> frozenset[tuple[str, int]]:
+    return frozenset((s.tool, s.pid) for s in sessions)
 
-    def __init__(self, config: Config) -> None:
-        self._config = config
-        self._curr: list[Session] | None = None
-        self.tick_id: int = 0
 
-    @staticmethod
-    def raw_session_keys(sessions: list[Session]) -> frozenset[tuple[str, int]]:
-        return frozenset((s.tool, s.pid) for s in sessions)
-
-    def tick(self) -> None:
-        """Sample current sessions from the OS."""
-        self.tick_id += 1
-        _begin_tick()
-        raw = list_all_sessions()
-        # Synthetic session PIDs are fake; skip lsof batch for them.
-        pids_needing = sorted({s.pid for s in raw if s.cwd is None and not s.synthetic})
-        if pids_needing:
-            for pid, cwd in resolve_cwds_batch(pids_needing).items():
-                _cwd_cache[pid] = cwd
-        for s in raw:
-            if s.cwd is None:
-                s.cwd = _cwd_cache.get(s.pid)
-            if s.project is None and s.cwd is not None:
-                s.project = project_label(s.cwd, self._config)
-        _enrich_session_metrics(raw, self._config)
-        self._curr = raw
-
-    def raw_sessions(self) -> list[Session]:
-        """Return the last raw sample (copy)."""
-        if self._curr is None:
-            return []
-        return list(self._curr)
+def tick(config: Config) -> list[Session]:
+    """Sample current sessions from the OS and return the enriched raw list."""
+    _begin_tick()
+    raw = list_all_sessions()
+    # Synthetic session PIDs are fake; skip lsof batch for them.
+    pids_needing = sorted({s.pid for s in raw if s.cwd is None and not s.synthetic})
+    if pids_needing:
+        for pid, cwd in resolve_cwds_batch(pids_needing).items():
+            _cwd_cache[pid] = cwd
+    for s in raw:
+        if s.cwd is None:
+            s.cwd = _cwd_cache.get(s.pid)
+        if s.project is None and s.cwd is not None:
+            s.project = project_label(s.cwd, config)
+    _enrich_session_metrics(raw, config)
+    return raw
 
 
 def stable_sessions_from_keys(
@@ -1222,5 +1207,5 @@ def stable_sessions_from_keys(
     persisted_prev: frozenset[tuple[str, int]],
 ) -> list[Session]:
     """Intersection of persisted raw keys with current sessions (debounced stable set)."""
-    stable = persisted_prev & Sampler.raw_session_keys(sessions)
+    stable = persisted_prev & raw_session_keys(sessions)
     return [s for s in sessions if (s.tool, s.pid) in stable]
