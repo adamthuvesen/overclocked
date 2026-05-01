@@ -1113,11 +1113,102 @@ def list_cursor_editor_windows() -> list[Session]:
     return sessions
 
 
-def list_cursor_agent_sessions() -> list[Session]:
+def _cursor_active_session_id(transcripts_dir: Path, cutoff: float) -> str | None:
+    """Return the sessionId dir name of the most-recently-active transcript.
+
+    Cursor stores transcripts at ``agent-transcripts/<sessionId>/<sessionId>.jsonl``
+    (and ``…/subagents/<UUID>.jsonl``). Walks every jsonl under ``transcripts_dir``,
+    keeps the freshest mtime above ``cutoff``, and returns the direct child of
+    ``transcripts_dir`` containing it. Returns ``None`` if no jsonl is fresh.
+    """
+    best_mtime = cutoff
+    best_session_id: str | None = None
+    try:
+        for f in transcripts_dir.rglob("*.jsonl"):
+            try:
+                mtime = f.stat().st_mtime
+            except OSError:
+                continue
+            if mtime <= best_mtime:
+                continue
+            try:
+                rel_parts = f.relative_to(transcripts_dir).parts
+            except ValueError:
+                continue
+            if not rel_parts:
+                continue
+            best_mtime = mtime
+            best_session_id = rel_parts[0]
+    except OSError:
+        return None
+    return best_session_id
+
+
+def _list_live_cursor_subagents_for_parent(parent: Session) -> list[Session]:
+    """Synthesise rows for live Cursor subagents of ``parent``.
+
+    Subagent transcripts live at
+    ``~/.cursor/projects/<encoded_cwd>/agent-transcripts/<sessionId>/subagents/<UUID>.jsonl``.
+    The directory name carries the parent linkage; the bare file stem is the agentId.
+    A subagent is considered live iff its jsonl mtime is within
+    ``_SUBAGENT_LIVENESS_SEC``.
+    """
+    if parent.cwd is None or parent.session_id is None:
+        return []
+    project_dir = _cursor_project_dir_for_cwd(parent.cwd)
+    if project_dir is None:
+        return []
+    sub_dir = project_dir / "agent-transcripts" / parent.session_id / "subagents"
+    if not sub_dir.is_dir():
+        return []
+    cutoff = time.time() - _SUBAGENT_LIVENESS_SEC
+    rows: list[tuple[Path, str, float]] = []
+    try:
+        with os.scandir(sub_dir) as it:
+            for entry in it:
+                name = entry.name
+                if not name.endswith(".jsonl"):
+                    continue
+                try:
+                    mtime = entry.stat(follow_symlinks=False).st_mtime
+                except OSError:
+                    continue
+                if mtime < cutoff:
+                    continue
+                agent_id = name[: -len(".jsonl")]
+                if not agent_id:
+                    continue
+                rows.append((Path(entry.path), agent_id, mtime))
+    except OSError:
+        return []
+    rows.sort(key=lambda r: r[1])  # deterministic order by agent_id
+    sessions: list[Session] = []
+    now = time.time()
+    for path, agent_id, mtime in rows:
+        status = "working" if (now - mtime) < _STATUS_RECENCY_SEC else "waiting"
+        sessions.append(
+            Session(
+                tool="cursor_agent",
+                pid=_synthetic_pid_str(f"cursor-subagent:{agent_id}"),
+                cwd=parent.cwd,
+                project=parent.project,
+                synthetic=True,
+                status=status,
+                transcript_path=path,
+                is_subagent=True,
+                parent_session_id=parent.session_id,
+                agent_id=agent_id,
+            ),
+        )
+    return sessions
+
+
+def list_cursor_agent_sessions(config: Config | None = None) -> list[Session]:
     """Detect active Cursor background agent sessions via transcript mtimes."""
     if not _CURSOR_PROJECTS_DIR.exists():
         return []
-    sessions = []
+    sessions: list[Session] = []
+    activity_cutoff = time.time() - _ACTIVITY_WINDOW_SEC
     for project_dir in _CURSOR_PROJECTS_DIR.iterdir():
         if not project_dir.is_dir():
             continue
@@ -1130,6 +1221,7 @@ def list_cursor_agent_sessions() -> list[Session]:
         if cwd is None:
             continue
         pid = _synthetic_pid(project_dir)
+        session_id = _cursor_active_session_id(transcripts_dir, activity_cutoff)
         sessions.append(
             Session(
                 tool="cursor_agent",
@@ -1137,18 +1229,33 @@ def list_cursor_agent_sessions() -> list[Session]:
                 cwd=cwd,
                 status=_cursor_coarse_status(project_dir),
                 synthetic=True,
+                session_id=session_id,
             ),
         )
-    return sessions
+
+    if config is not None and not config.show_subagents:
+        return sessions
+    children: list[Session] = []
+    for parent in sessions:
+        children.extend(_list_live_cursor_subagents_for_parent(parent))
+    return sessions + children
 
 
 def _merge_cursor_editor_and_agent(
     editor: list[Session],
     agent: list[Session],
 ) -> list[Session]:
-    """At most one Cursor session per workspace; prefer cursor_agent when both qualify."""
+    """At most one Cursor parent per workspace; prefer cursor_agent when both qualify.
+
+    Subagent rows (``is_subagent=True``) share their parent's cwd, so they bypass
+    the cwd-dedupe and pass through unchanged.
+    """
     by_norm: dict[str, Session] = {}
+    subagents: list[Session] = []
     for s in agent:
+        if s.is_subagent:
+            subagents.append(s)
+            continue
         n = _normalise_cwd(s.cwd)
         if n is not None:
             by_norm[n] = s
@@ -1157,7 +1264,7 @@ def _merge_cursor_editor_and_agent(
         if n is None or n in by_norm:
             continue
         by_norm[n] = s
-    return list(by_norm.values())
+    return list(by_norm.values()) + subagents
 
 
 def list_codex_sessions() -> list[Session]:
@@ -1272,7 +1379,7 @@ def _enrich_session_metrics(sessions: list[Session], config: Config) -> None:
 def list_all_sessions(config: Config | None = None) -> list[Session]:
     """Return all detected active sessions."""
     cursor_ed = list_cursor_editor_windows()
-    cursor_ag = list_cursor_agent_sessions()
+    cursor_ag = list_cursor_agent_sessions(config)
     return (
         list_claude_sessions(config)
         + _merge_cursor_editor_and_agent(cursor_ed, cursor_ag)

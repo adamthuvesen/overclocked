@@ -250,6 +250,100 @@ def test_list_cursor_agent_sessions_skips_projects_without_cwd(tmp_path, monkeyp
     assert sessions == []
 
 
+def _make_cursor_workspace(
+    tmp_path: Path,
+    *,
+    project_slug: str,
+    cwd: str,
+    session_id: str,
+) -> Path:
+    """Build a minimal Cursor workspace dir with a fresh parent transcript."""
+    proj = tmp_path / project_slug
+    transcripts = proj / "agent-transcripts" / session_id
+    transcripts.mkdir(parents=True)
+    (transcripts / f"{session_id}.jsonl").write_text("{}")
+    terminals = proj / "terminals"
+    terminals.mkdir()
+    (terminals / "1.txt").write_text(f"---\npid: 99\ncwd: {cwd}\n")
+    return proj
+
+
+def test_list_cursor_agent_sessions_populates_session_id(tmp_path, monkeypatch):
+    """Parent cursor_agent rows carry session_id derived from the transcript dir name."""
+    sid = "11111111-2222-3333-4444-555555555555"
+    _make_cursor_workspace(
+        tmp_path, project_slug="Users-me-dev-proj", cwd="/Users/me/dev/proj", session_id=sid
+    )
+    monkeypatch.setattr("overclocked.detectors._CURSOR_PROJECTS_DIR", tmp_path)
+    sessions = list_cursor_agent_sessions()
+    assert len(sessions) == 1
+    assert sessions[0].session_id == sid
+
+
+def test_list_cursor_agent_sessions_attaches_live_subagents(tmp_path, monkeypatch):
+    """A cursor_agent parent with two recent subagent jsonls emits two subagent rows."""
+    sid = "11111111-2222-3333-4444-555555555555"
+    proj = _make_cursor_workspace(
+        tmp_path, project_slug="Users-me-dev-proj", cwd="/Users/me/dev/proj", session_id=sid
+    )
+    sub_dir = proj / "agent-transcripts" / sid / "subagents"
+    sub_dir.mkdir()
+    (sub_dir / "aaa1.jsonl").write_text("{}")
+    (sub_dir / "bbb2.jsonl").write_text("{}")
+
+    monkeypatch.setattr("overclocked.detectors._CURSOR_PROJECTS_DIR", tmp_path)
+    sessions = list_cursor_agent_sessions(Config())
+
+    parents = [s for s in sessions if not s.is_subagent]
+    children = [s for s in sessions if s.is_subagent]
+    assert len(parents) == 1
+    assert parents[0].session_id == sid
+    assert len(children) == 2
+    assert {c.agent_id for c in children} == {"aaa1", "bbb2"}
+    assert all(c.parent_session_id == sid for c in children)
+    assert all(c.tool == "cursor_agent" for c in children)
+    assert all(c.cwd == "/Users/me/dev/proj" for c in children)
+    assert all(c.synthetic for c in children)
+
+
+def test_list_cursor_agent_sessions_ignores_stale_subagents(tmp_path, monkeypatch):
+    """Subagent jsonls older than the liveness window are not emitted."""
+    import os
+
+    sid = "11111111-2222-3333-4444-555555555555"
+    proj = _make_cursor_workspace(
+        tmp_path, project_slug="Users-me-dev-proj", cwd="/Users/me/dev/proj", session_id=sid
+    )
+    sub_dir = proj / "agent-transcripts" / sid / "subagents"
+    sub_dir.mkdir()
+    fresh = sub_dir / "fresh.jsonl"
+    stale = sub_dir / "stale.jsonl"
+    fresh.write_text("{}")
+    stale.write_text("{}")
+    old = time.time() - 2000
+    os.utime(stale, (old, old))
+
+    monkeypatch.setattr("overclocked.detectors._CURSOR_PROJECTS_DIR", tmp_path)
+    sessions = list_cursor_agent_sessions(Config())
+    children = [s for s in sessions if s.is_subagent]
+    assert [c.agent_id for c in children] == ["fresh"]
+
+
+def test_list_cursor_agent_sessions_show_subagents_false_omits_children(tmp_path, monkeypatch):
+    """show_subagents=False suppresses Cursor subagent rows."""
+    sid = "deadbeef-0000-0000-0000-000000000000"
+    proj = _make_cursor_workspace(
+        tmp_path, project_slug="Users-me-dev-proj", cwd="/Users/me/dev/proj", session_id=sid
+    )
+    sub_dir = proj / "agent-transcripts" / sid / "subagents"
+    sub_dir.mkdir()
+    (sub_dir / "x.jsonl").write_text("{}")
+
+    monkeypatch.setattr("overclocked.detectors._CURSOR_PROJECTS_DIR", tmp_path)
+    sessions = list_cursor_agent_sessions(Config(show_subagents=False))
+    assert all(not s.is_subagent for s in sessions)
+
+
 # ── list_cursor_editor_windows ────────────────────────────────────────────────
 
 
