@@ -70,6 +70,8 @@ redact_paths = ["~/clients/", "~/personal/"]
 session_metrics = false
 # Show per-session activity status (working/waiting/done) in the dropdown. Default: false.
 session_status = false
+# Show live subagent rows nested under their parent session. Default: true.
+show_subagents = true
 ```
 
 No network calls, telemetry, or remote storage. Everything overclocked writes stays
