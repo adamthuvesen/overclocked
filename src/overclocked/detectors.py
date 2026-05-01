@@ -147,13 +147,6 @@ def _cpu_percent(pid: int) -> float:
     return _ps_table[pid].pcpu
 
 
-def _ps_info(pid: int) -> tuple[str, int] | None:
-    if not _ps_table or pid not in _ps_table:
-        return None
-    row = _ps_table[pid]
-    return row.command, row.ppid
-
-
 def is_descendant_of(pid: int, names: list[str]) -> bool:
     """Return True if any ancestor process has a name matching names."""
     if not _ps_table:
