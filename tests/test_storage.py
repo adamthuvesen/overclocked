@@ -20,92 +20,15 @@ def db(tmp_path):
     return connect(tmp_path / "test.db")
 
 
-# ── schema / migrations ───────────────────────────────────────────────────────
+# ── schema ────────────────────────────────────────────────────────────────────
 
 
-def test_connect_creates_tables(db):
+def test_connect_creates_snapshots_table(db):
     tables = {
         row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
     }
     assert "snapshots" in tables
     assert "sessions" not in tables
-
-
-def test_migrations_bring_user_version_to_4(tmp_path):
-    db = connect(tmp_path / "fresh.db")
-    version = db.execute("PRAGMA user_version").fetchone()[0]
-    assert version == 4
-
-
-def test_migrations_idempotent(tmp_path):
-    path = tmp_path / "idempotent.db"
-    db1 = connect(path)
-    v1 = db1.execute("PRAGMA user_version").fetchone()[0]
-    db1.close()
-    db2 = connect(path)
-    v2 = db2.execute("PRAGMA user_version").fetchone()[0]
-    assert v1 == v2 == 4
-
-
-def test_migration_converts_loaded_schema_to_active(tmp_path):
-    import sqlite3
-
-    path = tmp_path / "legacy.db"
-    conn = sqlite3.connect(path)
-    conn.execute("""
-        CREATE TABLE snapshots (
-            ts           INTEGER PRIMARY KEY,
-            loaded       INTEGER NOT NULL,
-            hot          INTEGER NOT NULL,
-            by_tool_json TEXT    NOT NULL
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE sessions (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            tool        TEXT    NOT NULL,
-            project     TEXT,
-            started_at  INTEGER NOT NULL,
-            ended_at    INTEGER,
-            pid         INTEGER,
-            session_key TEXT
-        )
-    """)
-    conn.execute(
-        "INSERT INTO snapshots (ts, loaded, hot, by_tool_json) VALUES (?,?,?,?)",
-        (123, 4, 2, '{"claude": 4}'),
-    )
-    conn.execute("PRAGMA user_version = 2")
-    conn.commit()
-    conn.close()
-
-    migrated = connect(path)
-    columns = [row[1] for row in migrated.execute("PRAGMA table_info(snapshots)").fetchall()]
-    assert columns == ["ts", "active", "by_tool_json"]
-    row = migrated.execute("SELECT * FROM snapshots WHERE ts = 123").fetchone()
-    assert row["active"] == 4
-    assert row["by_tool_json"] == '{"claude": 4}'
-
-
-def test_migration_rollback_on_error(tmp_path):
-    """A failing migration leaves user_version unchanged."""
-    from overclocked.storage import _MIGRATIONS, _run_migrations
-
-    # Connect first so v1 and v2 run successfully
-    db = connect(tmp_path / "rollback.db")
-    version_before = db.execute("PRAGMA user_version").fetchone()[0]
-
-    def bad_migration(conn):
-        conn.execute("this is not valid SQL")
-
-    _MIGRATIONS.append(bad_migration)
-    try:
-        with pytest.raises(Exception):
-            _run_migrations(db)
-        version_after = db.execute("PRAGMA user_version").fetchone()[0]
-        assert version_after == version_before
-    finally:
-        _MIGRATIONS.pop()
 
 
 def test_wal_pragma_applied(tmp_path):

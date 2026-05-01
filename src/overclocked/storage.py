@@ -7,105 +7,14 @@ import sqlite3
 import statistics
 import time
 from collections import defaultdict
-from collections.abc import Callable
 from pathlib import Path
 
 from overclocked.detectors import Session
 from overclocked.runtime_home import runtime_home
 
-# ── migrations ────────────────────────────────────────────────────────────────
-
-
-def _migration_v1(conn: sqlite3.Connection) -> None:
-    """Create base tables (idempotent)."""
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS snapshots (
-            ts           INTEGER PRIMARY KEY,
-            active       INTEGER NOT NULL,
-            by_tool_json TEXT    NOT NULL
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS sessions (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            tool        TEXT    NOT NULL,
-            project     TEXT,
-            started_at  INTEGER NOT NULL,
-            ended_at    INTEGER,
-            pid         INTEGER,
-            session_key TEXT
-        )
-    """)
-
-
-def _migration_v2(conn: sqlite3.Connection) -> None:
-    """Add performance indexes."""
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_sessions_open ON sessions(ended_at) WHERE ended_at IS NULL"
-    )
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_ts ON snapshots(ts)")
-
-
-def _migration_v3(conn: sqlite3.Connection) -> None:
-    """Rename snapshot metric from loaded/hot to a single active count."""
-    columns = [row[1] for row in conn.execute("PRAGMA table_info(snapshots)")]
-    if not columns:
-        return
-    if columns == ["ts", "active", "by_tool_json"]:
-        return
-
-    conn.execute("""
-        CREATE TABLE snapshots_v3 (
-            ts           INTEGER PRIMARY KEY,
-            active       INTEGER NOT NULL,
-            by_tool_json TEXT    NOT NULL
-        )
-    """)
-
-    if "loaded" in columns:
-        conn.execute("""
-            INSERT INTO snapshots_v3 (ts, active, by_tool_json)
-            SELECT ts, loaded, by_tool_json FROM snapshots
-        """)
-    else:
-        conn.execute("""
-            INSERT INTO snapshots_v3 (ts, active, by_tool_json)
-            SELECT ts, active, by_tool_json FROM snapshots
-        """)
-
-    conn.execute("DROP TABLE snapshots")
-    conn.execute("ALTER TABLE snapshots_v3 RENAME TO snapshots")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_ts ON snapshots(ts)")
-
-
-def _migration_v4(conn: sqlite3.Connection) -> None:
-    """Drop the unused ``sessions`` table and its index."""
-    conn.execute("DROP INDEX IF EXISTS idx_sessions_open")
-    conn.execute("DROP TABLE IF EXISTS sessions")
-
-
-_MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
-    _migration_v1,
-    _migration_v2,
-    _migration_v3,
-    _migration_v4,
-]
-
-
-def _run_migrations(conn: sqlite3.Connection) -> None:
-    """Apply pending migrations in order using PRAGMA user_version."""
-    current = conn.execute("PRAGMA user_version").fetchone()[0]
-    for version, migration in enumerate(_MIGRATIONS, start=1):
-        if current >= version:
-            continue
-        with conn:
-            migration(conn)
-            conn.execute(f"PRAGMA user_version = {version}")
-        current = version
-
 
 def connect(db_path: str | Path | None = None) -> sqlite3.Connection:
-    """Open (or create) the history database, apply pragmas, and run migrations."""
+    """Open (or create) the history database, apply pragmas, and ensure schema."""
     if db_path is None:
         home = runtime_home()
         home.mkdir(parents=True, exist_ok=True)
@@ -115,7 +24,14 @@ def connect(db_path: str | Path | None = None) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA synchronous=NORMAL")
-    _run_migrations(conn)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS snapshots (
+            ts           INTEGER PRIMARY KEY,
+            active       INTEGER NOT NULL,
+            by_tool_json TEXT    NOT NULL
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_ts ON snapshots(ts)")
     return conn
 
 
