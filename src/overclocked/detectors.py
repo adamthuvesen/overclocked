@@ -780,15 +780,7 @@ def cursor_agent_session_is_active(project_dir: Path) -> bool:
     if not transcripts_dir.exists():
         return False
     cutoff = time.time() - _ACTIVITY_WINDOW_SEC
-    # Use file mtimes only: the agent-transcripts/ directory mtime often stays stale while
-    # Cursor appends to existing jsonl (many filesystems do not bump the parent on writes).
-    for f in transcripts_dir.rglob("*.jsonl"):
-        try:
-            if f.stat().st_mtime > cutoff:
-                return True
-        except OSError:
-            pass
-    return False
+    return _cursor_active_session_id(transcripts_dir, cutoff) is not None
 
 
 def codex_app_session_is_active(session_file: Path) -> bool:
@@ -1215,13 +1207,13 @@ def list_cursor_agent_sessions(config: Config | None = None) -> list[Session]:
         transcripts_dir = project_dir / "agent-transcripts"
         if not transcripts_dir.exists():
             continue
-        if not cursor_agent_session_is_active(project_dir):
+        session_id = _cursor_active_session_id(transcripts_dir, activity_cutoff)
+        if session_id is None:
             continue
         cwd = _cursor_project_workspace_cwd(project_dir)
         if cwd is None:
             continue
         pid = _synthetic_pid(project_dir)
-        session_id = _cursor_active_session_id(transcripts_dir, activity_cutoff)
         sessions.append(
             Session(
                 tool="cursor_agent",
