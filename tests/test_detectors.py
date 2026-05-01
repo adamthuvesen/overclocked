@@ -541,6 +541,23 @@ def test_list_claude_app_sessions_ignores_old_file(tmp_path, monkeypatch):
     assert list_claude_app_sessions() == []
 
 
+def test_list_claude_app_sessions_ignores_subagent_files(tmp_path, monkeypatch):
+    """Subagent jsonls inherit ``entrypoint=claude-desktop`` from their parent.
+
+    They live at ``<project>/<sessionId>/subagents/agent-*.jsonl`` and must not
+    be mistaken for top-level desktop sessions — the parent already covers them
+    and rendering surfaces them as nested children.
+    """
+    parent_file = tmp_path / "-Users-me-dev-proj" / "session-1.jsonl"
+    _make_claude_session(parent_file, "/Users/me/dev/proj", session_id="session-1")
+    sub_file = tmp_path / "-Users-me-dev-proj" / "session-1" / "subagents" / "agent-abc.jsonl"
+    _make_claude_session(sub_file, "/Users/me/dev/proj", session_id="session-1")
+    monkeypatch.setattr("overclocked.detectors._CLAUDE_PROJECTS_DIR", tmp_path)
+    sessions = list_claude_app_sessions()
+    assert len(sessions) == 1
+    assert sessions[0].transcript_path == parent_file
+
+
 def test_list_claude_app_sessions_counts_recent_files_not_helper_pids(tmp_path, monkeypatch):
     import os
 
@@ -666,6 +683,135 @@ def test_list_claude_sessions_keeps_tty_when_cwd_unresolved_desktop_present(monk
     by_pid = {s.pid: s for s in sessions}
     assert by_pid[800_000].cwd == "/Users/me/proj"
     assert by_pid[9].cwd is None
+
+
+# ── subagent discovery ────────────────────────────────────────────────────────
+
+
+def _make_subagent_jsonl(path: Path, *, parent_sid: str, agent_id: str) -> None:
+    """Write a minimal subagent jsonl line at ``path``."""
+    import json
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "type": "user",
+        "isSidechain": True,
+        "agentId": agent_id,
+        "sessionId": parent_sid,
+        "timestamp": _iso_now_z(),
+    }
+    path.write_text(json.dumps(record) + "\n")
+
+
+def test_list_claude_sessions_attaches_live_subagents(tmp_path, monkeypatch):
+    """Parent desktop session with two recent subagent jsonls → two subagent rows."""
+    parent_sid = "11111111-2222-3333-4444-555555555555"
+    proj = tmp_path / "-Users-me-dev-proj"
+    parent_jsonl = proj / f"{parent_sid}.jsonl"
+    _make_claude_session(parent_jsonl, "/Users/me/dev/proj", session_id=parent_sid)
+    sub_dir = proj / parent_sid / "subagents"
+    _make_subagent_jsonl(sub_dir / "agent-aaa1.jsonl", parent_sid=parent_sid, agent_id="aaa1")
+    _make_subagent_jsonl(sub_dir / "agent-bbb2.jsonl", parent_sid=parent_sid, agent_id="bbb2")
+
+    monkeypatch.setattr("overclocked.detectors._CLAUDE_PROJECTS_DIR", tmp_path)
+    monkeypatch.setattr("overclocked.detectors._claude_pgrep_all", lambda: [])
+    sessions = list_claude_sessions(Config())
+
+    parents = [s for s in sessions if not s.is_subagent]
+    children = [s for s in sessions if s.is_subagent]
+    assert len(parents) == 1
+    assert parents[0].session_id == parent_sid
+    assert len(children) == 2
+    assert {c.agent_id for c in children} == {"aaa1", "bbb2"}
+    assert all(c.parent_session_id == parent_sid for c in children)
+    assert all(c.cwd == "/Users/me/dev/proj" for c in children)
+    assert all(c.synthetic for c in children)
+
+
+def test_list_claude_sessions_filters_stale_subagents(tmp_path, monkeypatch):
+    """Subagent jsonl with mtime outside the activity window is dropped."""
+    import os
+
+    parent_sid = "11111111-2222-3333-4444-555555555555"
+    proj = tmp_path / "-Users-me-dev-proj"
+    parent_jsonl = proj / f"{parent_sid}.jsonl"
+    _make_claude_session(parent_jsonl, "/Users/me/dev/proj", session_id=parent_sid)
+    sub_dir = proj / parent_sid / "subagents"
+    fresh = sub_dir / "agent-fresh.jsonl"
+    stale = sub_dir / "agent-stale.jsonl"
+    _make_subagent_jsonl(fresh, parent_sid=parent_sid, agent_id="fresh")
+    _make_subagent_jsonl(stale, parent_sid=parent_sid, agent_id="stale")
+    old = time.time() - 2000
+    os.utime(stale, (old, old))
+
+    monkeypatch.setattr("overclocked.detectors._CLAUDE_PROJECTS_DIR", tmp_path)
+    monkeypatch.setattr("overclocked.detectors._claude_pgrep_all", lambda: [])
+    sessions = list_claude_sessions(Config())
+
+    children = [s for s in sessions if s.is_subagent]
+    assert [c.agent_id for c in children] == ["fresh"]
+
+
+def test_list_claude_sessions_drops_subagents_after_60s_quiet(tmp_path, monkeypatch):
+    """A subagent silent for 60s is dropped, even though the parent's 5-min window persists.
+
+    Verifies subagents disappear well before the parent activity window expires.
+    """
+    import os
+
+    parent_sid = "22222222-3333-4444-5555-666666666666"
+    proj = tmp_path / "-Users-me-dev-proj"
+    _make_claude_session(proj / f"{parent_sid}.jsonl", "/Users/me/dev/proj", session_id=parent_sid)
+    sub_dir = proj / parent_sid / "subagents"
+    quiet = sub_dir / "agent-quiet.jsonl"
+    _make_subagent_jsonl(quiet, parent_sid=parent_sid, agent_id="quiet")
+    sixty_sec_ago = time.time() - 60
+    os.utime(quiet, (sixty_sec_ago, sixty_sec_ago))
+
+    monkeypatch.setattr("overclocked.detectors._CLAUDE_PROJECTS_DIR", tmp_path)
+    monkeypatch.setattr("overclocked.detectors._claude_pgrep_all", lambda: [])
+    sessions = list_claude_sessions(Config())
+
+    parents = [s for s in sessions if not s.is_subagent]
+    children = [s for s in sessions if s.is_subagent]
+    assert len(parents) == 1  # parent still shown (5-min window not yet exceeded)
+    assert children == []  # subagent dropped after the tighter 30s window
+
+
+def test_list_claude_sessions_finds_subagents_under_dotted_cwd(tmp_path, monkeypatch):
+    """Worktree-style cwds (containing ``.``/``_``) resolve to the right project dir.
+
+    Claude Code encodes the cwd by replacing ``/``, ``.``, and ``_`` with ``-``,
+    so ``/Users/me/dev/x/.claude/wt`` lands at ``-Users-me-dev-x--claude-wt``.
+    Earlier code only replaced ``/`` and silently failed for these paths.
+    """
+    parent_sid = "abcdef00-1111-2222-3333-444444444444"
+    proj = tmp_path / "-Users-me-dev-x--claude-wt"
+    parent_jsonl = proj / f"{parent_sid}.jsonl"
+    _make_claude_session(parent_jsonl, "/Users/me/dev/x/.claude/wt", session_id=parent_sid)
+    sub_dir = proj / parent_sid / "subagents"
+    _make_subagent_jsonl(sub_dir / "agent-aaa1.jsonl", parent_sid=parent_sid, agent_id="aaa1")
+
+    monkeypatch.setattr("overclocked.detectors._CLAUDE_PROJECTS_DIR", tmp_path)
+    monkeypatch.setattr("overclocked.detectors._claude_pgrep_all", lambda: [])
+    sessions = list_claude_sessions(Config())
+    children = [s for s in sessions if s.is_subagent]
+    assert [c.agent_id for c in children] == ["aaa1"]
+
+
+def test_list_claude_sessions_show_subagents_false_omits_children(tmp_path, monkeypatch):
+    """show_subagents=False suppresses subagent rows."""
+    parent_sid = "deadbeef-0000-0000-0000-000000000000"
+    proj = tmp_path / "-Users-me-dev-proj"
+    _make_claude_session(proj / f"{parent_sid}.jsonl", "/Users/me/dev/proj", session_id=parent_sid)
+    sub_dir = proj / parent_sid / "subagents"
+    _make_subagent_jsonl(sub_dir / "agent-x.jsonl", parent_sid=parent_sid, agent_id="x")
+
+    monkeypatch.setattr("overclocked.detectors._CLAUDE_PROJECTS_DIR", tmp_path)
+    monkeypatch.setattr("overclocked.detectors._claude_pgrep_all", lambda: [])
+    sessions = list_claude_sessions(Config(show_subagents=False))
+
+    assert all(not s.is_subagent for s in sessions)
 
 
 # ── _claude_pgrep_all (single call per tick) ──────────────────────────────────
@@ -852,7 +998,8 @@ def test_claude_cli_inactive_stale_agent_transcript(tmp_path, monkeypatch):
 
 def test_tick_first_tick_returns_nothing(monkeypatch):
     monkeypatch.setattr(
-        "overclocked.detectors.list_all_sessions", lambda: [Session(tool="claude", pid=1)]
+        "overclocked.detectors.list_all_sessions",
+        lambda config=None: [Session(tool="claude", pid=1)],
     )
     first = tick(Config())
     assert stable_sessions_from_keys(first, frozenset()) == []
@@ -860,7 +1007,8 @@ def test_tick_first_tick_returns_nothing(monkeypatch):
 
 def test_tick_two_ticks_confirms(monkeypatch):
     monkeypatch.setattr(
-        "overclocked.detectors.list_all_sessions", lambda: [Session(tool="claude", pid=1)]
+        "overclocked.detectors.list_all_sessions",
+        lambda config=None: [Session(tool="claude", pid=1)],
     )
     k1 = raw_session_keys(tick(Config()))
     sessions = stable_sessions_from_keys(tick(Config()), k1)
@@ -872,7 +1020,7 @@ def test_tick_flicker_not_propagated(monkeypatch):
     """A session appearing in tick 1 but not tick 2 is not emitted after tick 2."""
     call_count = {"n": 0}
 
-    def fake_list():
+    def fake_list(config=None):
         call_count["n"] += 1
         if call_count["n"] == 1:
             return [Session(tool="claude", pid=1)]
@@ -887,7 +1035,7 @@ def test_tick_stable_addition(monkeypatch):
     """Session seen in tick N and N+1 but not N-1 is emitted after tick N+1."""
     call_count = {"n": 0}
 
-    def fake_list():
+    def fake_list(config=None):
         call_count["n"] += 1
         if call_count["n"] >= 2:
             return [Session(tool="codex", pid=77)]

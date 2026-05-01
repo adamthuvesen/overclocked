@@ -38,6 +38,14 @@ class Session:
     cache_create: int | None = None
     #: Desktop / file-backed session jsonl for metrics (Claude desktop, Codex desktop)
     transcript_path: Path | None = None
+    #: Claude Code session UUID; used to link subagents to their parent.
+    session_id: str | None = None
+    #: True when this row represents a Task-tool subagent of another session.
+    is_subagent: bool = False
+    #: Parent ``session_id`` when ``is_subagent`` is True.
+    parent_session_id: str | None = None
+    #: Claude subagent agentId (``agent-<id>.jsonl`` filename body).
+    agent_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -68,6 +76,10 @@ _ACTIVITY_WINDOW_SEC = 5 * 60
 _CPU_ACTIVITY_THRESHOLD = 5.0
 # abtop-style session status (transcript recency + CPU + tool children)
 _STATUS_RECENCY_SEC = 30
+# Subagents append to their jsonl on every tool turn, so a 30s gap is a
+# strong signal the subagent has finished — drop the row instead of letting
+# it linger for the full 5-min activity window.
+_SUBAGENT_LIVENESS_SEC = _STATUS_RECENCY_SEC
 _STATUS_PARENT_CPU_PCT = 1.0
 _STATUS_DESCENDANT_CPU_PCT = 5.0
 
@@ -474,14 +486,23 @@ def _latest_mtime_under(root: Path) -> float:
 
 
 def _claude_project_dir_for_cwd(cwd: str) -> Path | None:
-    """Resolve ~/.claude/projects/<encoded> for a filesystem cwd, if it exists."""
+    """Resolve ~/.claude/projects/<encoded> for a filesystem cwd, if it exists.
+
+    Claude Code encodes the cwd by replacing ``/``, ``.``, and ``_`` with ``-``
+    (see :func:`_encode_cwd_for_claude_projects`) — so a cwd like
+    ``/Users/me/dev/x/.claude/wt`` lands at ``-Users-me-dev-x--claude-wt``.
+    The simpler ``/``-only encoding is kept as a fallback for paths without
+    ``.``/``_`` to stay forward-compatible with any older layout on disk.
+    """
     if not _CLAUDE_PROJECTS_DIR.exists():
         return None
     tail = cwd.rstrip("/")
     if not tail:
         return None
+    full = _encode_cwd_for_claude_projects(tail)
     slug = tail.lstrip("/").replace("/", "-")
     candidates = (
+        _CLAUDE_PROJECTS_DIR / full,
         _CLAUDE_PROJECTS_DIR / f"-{slug}",
         _CLAUDE_PROJECTS_DIR / slug,
     )
@@ -863,6 +884,71 @@ def _claude_pgrep_all() -> list[int]:
     return _pgrep(_CLAUDE_CLI_COMBINED_PATTERN)
 
 
+def _claude_session_id_from_jsonl_path(path: Path) -> str | None:
+    """Extract a Claude session UUID from ``<sessionId>.jsonl``."""
+    stem = path.stem
+    return stem or None
+
+
+def _list_live_subagents_for_parent(parent: Session) -> list[Session]:
+    """Synthesise rows for live Task-tool subagents of ``parent``.
+
+    Subagent transcripts live at
+    ``~/.claude/projects/<encoded_cwd>/<parentSessionId>/subagents/agent-<agentId>.jsonl``.
+    The directory name carries the parent linkage; the filename carries the
+    agentId. A subagent is considered live iff its jsonl mtime is within
+    ``_ACTIVITY_WINDOW_SEC`` (matching the threshold used to gate the parent).
+    """
+    if parent.cwd is None or parent.session_id is None:
+        return []
+    proj = _claude_project_dir_for_cwd(parent.cwd)
+    if proj is None:
+        return []
+    sub_dir = proj / parent.session_id / "subagents"
+    if not sub_dir.is_dir():
+        return []
+    cutoff = time.time() - _SUBAGENT_LIVENESS_SEC
+    rows: list[tuple[Path, str, float]] = []
+    try:
+        with os.scandir(sub_dir) as it:
+            for entry in it:
+                name = entry.name
+                if not name.startswith("agent-") or not name.endswith(".jsonl"):
+                    continue
+                try:
+                    mtime = entry.stat(follow_symlinks=False).st_mtime
+                except OSError:
+                    continue
+                if mtime < cutoff:
+                    continue
+                agent_id = name[len("agent-") : -len(".jsonl")]
+                if not agent_id:
+                    continue
+                rows.append((Path(entry.path), agent_id, mtime))
+    except OSError:
+        return []
+    rows.sort(key=lambda r: r[1])  # deterministic order by agent_id
+    sessions: list[Session] = []
+    now = time.time()
+    for path, agent_id, mtime in rows:
+        status = "working" if (now - mtime) < _STATUS_RECENCY_SEC else "waiting"
+        sessions.append(
+            Session(
+                tool="claude",
+                pid=_synthetic_pid_str(f"subagent:{agent_id}"),
+                cwd=parent.cwd,
+                project=parent.project,
+                synthetic=True,
+                status=status,
+                transcript_path=path,
+                is_subagent=True,
+                parent_session_id=parent.session_id,
+                agent_id=agent_id,
+            ),
+        )
+    return sessions
+
+
 def list_claude_app_sessions() -> list[Session]:
     """Detect active Claude desktop sessions via recent session files."""
     if not _CLAUDE_PROJECTS_DIR.exists():
@@ -875,6 +961,12 @@ def list_claude_app_sessions() -> list[Session]:
     )
     sessions: list[Session] = []
     for session_file, _mtime in candidates:
+        # Subagent transcripts live at <project>/<sessionId>/subagents/agent-*.jsonl
+        # and inherit the parent's entrypoint/cwd, so they'd masquerade as their
+        # own top-level desktop session. They're surfaced separately as children
+        # of the parent row by ``_list_live_subagents_for_parent``.
+        if session_file.parent.name == "subagents":
+            continue
         entrypoint, cwd = _claude_session_meta(session_file)
         if entrypoint != "claude-desktop":
             continue
@@ -894,6 +986,7 @@ def list_claude_app_sessions() -> list[Session]:
                 status=_claude_desktop_session_status(session_file),
                 transcript_path=session_file,
                 synthetic=True,
+                session_id=_claude_session_id_from_jsonl_path(session_file),
             ),
         )
     return sessions
@@ -920,12 +1013,17 @@ def _merge_claude_tty_with_desktop(
         if n is not None and n in desktop_norm:
             continue
         st = _claude_tty_session_status(s.pid, cwd)
-        kept_tty.append(Session(tool="claude", pid=s.pid, cwd=cwd, status=st))
+        sid: str | None = None
+        if cwd is not None:
+            tty_path = _find_claude_transcript_jsonl_for_tty(s.pid, cwd)
+            if tty_path is not None:
+                sid = _claude_session_id_from_jsonl_path(tty_path)
+        kept_tty.append(Session(tool="claude", pid=s.pid, cwd=cwd, status=st, session_id=sid))
     return list(app_sessions) + kept_tty
 
 
-def list_claude_sessions() -> list[Session]:
-    """Detect active Claude Code terminal and desktop sessions."""
+def list_claude_sessions(config: Config | None = None) -> list[Session]:
+    """Detect active Claude Code terminal and desktop sessions (plus live subagents)."""
     tty_sessions: list[Session] = []
     for pid in _claude_pgrep_all():
         if not _has_tty(pid):
@@ -936,7 +1034,13 @@ def list_claude_sessions() -> list[Session]:
             continue
         tty_sessions.append(Session(tool="claude", pid=pid))
 
-    return _merge_claude_tty_with_desktop(tty_sessions, list_claude_app_sessions())
+    parents = _merge_claude_tty_with_desktop(tty_sessions, list_claude_app_sessions())
+    if config is not None and not config.show_subagents:
+        return parents
+    children: list[Session] = []
+    for parent in parents:
+        children.extend(_list_live_subagents_for_parent(parent))
+    return parents + children
 
 
 def _cursor_editor_workspace_is_active(project_dir: Path, cutoff: float) -> bool:
@@ -1129,6 +1233,10 @@ def _enrich_session_metrics(sessions: list[Session], config: Config) -> None:
     for s in sessions:
         if s.tool in ("cursor_editor", "cursor_agent"):
             continue
+        if s.is_subagent:
+            # Subagent token usage rolls up to the parent transcript; surfacing
+            # per-subagent metrics is a separate, harder change. Skip for now.
+            continue
         if config.is_redacted(s.cwd) or s.project == "redacted":
             _clear_session_metrics(s)
             continue
@@ -1161,12 +1269,12 @@ def _enrich_session_metrics(sessions: list[Session], config: Config) -> None:
         s.cache_create = snap.cache_create
 
 
-def list_all_sessions() -> list[Session]:
+def list_all_sessions(config: Config | None = None) -> list[Session]:
     """Return all detected active sessions."""
     cursor_ed = list_cursor_editor_windows()
     cursor_ag = list_cursor_agent_sessions()
     return (
-        list_claude_sessions()
+        list_claude_sessions(config)
         + _merge_cursor_editor_and_agent(cursor_ed, cursor_ag)
         + list_codex_sessions()
         + list_codex_app_sessions()
@@ -1180,7 +1288,7 @@ def raw_session_keys(sessions: list[Session]) -> frozenset[tuple[str, int]]:
 def tick(config: Config) -> list[Session]:
     """Sample current sessions from the OS and return the enriched raw list."""
     _begin_tick()
-    raw = list_all_sessions()
+    raw = list_all_sessions(config)
     # Synthetic session PIDs are fake; skip lsof batch for them.
     pids_needing = sorted({s.pid for s in raw if s.cwd is None and not s.synthetic})
     if pids_needing:

@@ -13,6 +13,7 @@ class Config:
     redact_paths: list[str] = field(default_factory=lambda: ["~/clients/"])
     session_status: bool = False
     session_metrics: bool = False
+    show_subagents: bool = True
 
     def is_redacted(self, cwd: str | None) -> bool:
         """Return True if cwd is inside any configured redaction root."""
@@ -73,8 +74,20 @@ def load_config() -> Config:
                 "using default false",
                 file=sys.stderr,
             )
+    show_subagents = True
+    if "show_subagents" in display:
+        raw_ss2 = display.get("show_subagents")
+        if isinstance(raw_ss2, bool):
+            show_subagents = raw_ss2
+        else:
+            print(
+                f"overclocked: warning: {config_path}: show_subagents must be bool; "
+                "using default true",
+                file=sys.stderr,
+            )
     return Config(
         redact_paths=redact_paths,
         session_status=session_status,
         session_metrics=session_metrics,
+        show_subagents=show_subagents,
     )
