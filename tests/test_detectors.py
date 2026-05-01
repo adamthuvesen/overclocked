@@ -604,6 +604,170 @@ def test_list_codex_app_sessions_none_cwd_distinct(tmp_path, monkeypatch):
     assert len(sessions) == 2
 
 
+# ── Codex subagent grouping ───────────────────────────────────────────────────
+
+
+def _make_codex_rollout(
+    path: Path,
+    *,
+    rollout_id: str,
+    cwd: str,
+    originator: str = "Codex Desktop",
+    parent_thread_id: str | None = None,
+    agent_nickname: str | None = None,
+) -> None:
+    """Write a Codex rollout file with a session_meta first line.
+
+    When ``parent_thread_id`` is set, the meta carries the
+    ``source.subagent.thread_spawn`` variant — that's the on-disk subagent signal.
+    """
+    import json
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict = {"id": rollout_id, "cwd": cwd, "originator": originator}
+    if parent_thread_id is not None:
+        payload["source"] = {
+            "subagent": {"thread_spawn": {"parent_thread_id": parent_thread_id, "depth": 1}}
+        }
+    if agent_nickname is not None:
+        payload["agent_nickname"] = agent_nickname
+    record = {"timestamp": _iso_now_z(), "type": "session_meta", "payload": payload}
+    path.write_text(json.dumps(record) + "\n")
+
+
+def test_list_codex_app_sessions_populates_session_id(tmp_path, monkeypatch):
+    f = tmp_path / "rollout-parent.jsonl"
+    _make_codex_rollout(f, rollout_id="parent-001", cwd="/Users/me/proj")
+    monkeypatch.setattr("overclocked.detectors._CODEX_SESSIONS_DIR", tmp_path)
+    sessions = list_codex_app_sessions()
+    assert len(sessions) == 1
+    assert sessions[0].session_id == "parent-001"
+
+
+def test_list_codex_app_sessions_attaches_live_subagents(tmp_path, monkeypatch):
+    """Parent rollout + two fresh subagent rollouts → two is_subagent rows."""
+    parent_id = "parent-001"
+    _make_codex_rollout(
+        tmp_path / "rollout-parent.jsonl",
+        rollout_id=parent_id,
+        cwd="/Users/me/proj",
+    )
+    _make_codex_rollout(
+        tmp_path / "rollout-child-a.jsonl",
+        rollout_id="child-a",
+        cwd="/Users/me/proj",
+        originator="codex_cli_rs",
+        parent_thread_id=parent_id,
+        agent_nickname="reviewer",
+    )
+    _make_codex_rollout(
+        tmp_path / "rollout-child-b.jsonl",
+        rollout_id="child-b",
+        cwd="/Users/me/proj",
+        originator="codex_cli_rs",
+        parent_thread_id=parent_id,
+    )
+    monkeypatch.setattr("overclocked.detectors._CODEX_SESSIONS_DIR", tmp_path)
+    sessions = list_codex_app_sessions(Config())
+
+    parents = [s for s in sessions if not s.is_subagent]
+    children = [s for s in sessions if s.is_subagent]
+    assert len(parents) == 1
+    assert parents[0].session_id == parent_id
+    assert len(children) == 2
+    assert {c.agent_id for c in children} == {"child-a", "child-b"}
+    assert all(c.parent_session_id == parent_id for c in children)
+    assert all(c.tool == "codex" for c in children)
+    assert all(c.synthetic for c in children)
+
+
+def test_list_codex_app_sessions_ignores_stale_subagents(tmp_path, monkeypatch):
+    import os
+
+    parent_id = "parent-002"
+    _make_codex_rollout(tmp_path / "p.jsonl", rollout_id=parent_id, cwd="/Users/me/proj")
+    fresh = tmp_path / "fresh.jsonl"
+    stale = tmp_path / "stale.jsonl"
+    _make_codex_rollout(
+        fresh,
+        rollout_id="fresh",
+        cwd="/Users/me/proj",
+        originator="codex_cli_rs",
+        parent_thread_id=parent_id,
+    )
+    _make_codex_rollout(
+        stale,
+        rollout_id="stale",
+        cwd="/Users/me/proj",
+        originator="codex_cli_rs",
+        parent_thread_id=parent_id,
+    )
+    old = time.time() - 2000
+    os.utime(stale, (old, old))
+    monkeypatch.setattr("overclocked.detectors._CODEX_SESSIONS_DIR", tmp_path)
+
+    sessions = list_codex_app_sessions(Config())
+    children = [s for s in sessions if s.is_subagent]
+    assert [c.agent_id for c in children] == ["fresh"]
+
+
+def test_list_codex_app_sessions_show_subagents_false_omits_children(tmp_path, monkeypatch):
+    parent_id = "parent-003"
+    _make_codex_rollout(tmp_path / "p.jsonl", rollout_id=parent_id, cwd="/Users/me/proj")
+    _make_codex_rollout(
+        tmp_path / "c.jsonl",
+        rollout_id="c",
+        cwd="/Users/me/proj",
+        originator="codex_cli_rs",
+        parent_thread_id=parent_id,
+    )
+    monkeypatch.setattr("overclocked.detectors._CODEX_SESSIONS_DIR", tmp_path)
+    sessions = list_codex_app_sessions(Config(show_subagents=False))
+    assert all(not s.is_subagent for s in sessions)
+
+
+def test_list_codex_app_sessions_ignores_forked_from_id(tmp_path, monkeypatch):
+    """A rollout with forked_from_id but no subagent source is a normal parent, not a subagent."""
+    import json
+
+    forked = tmp_path / "forked.jsonl"
+    forked.parent.mkdir(parents=True, exist_ok=True)
+    forked.write_text(
+        json.dumps(
+            {
+                "timestamp": _iso_now_z(),
+                "type": "session_meta",
+                "payload": {
+                    "id": "forked-001",
+                    "cwd": "/Users/me/forked-proj",
+                    "originator": "Codex Desktop",
+                    "forked_from_id": "some-other-session",
+                },
+            }
+        )
+        + "\n"
+    )
+    monkeypatch.setattr("overclocked.detectors._CODEX_SESSIONS_DIR", tmp_path)
+    sessions = list_codex_app_sessions(Config())
+    assert len(sessions) == 1
+    assert sessions[0].session_id == "forked-001"
+    assert sessions[0].is_subagent is False
+
+
+def test_codex_classifier_handles_torn_first_line(tmp_path, monkeypatch):
+    """Half-written first line in a rollout is skipped without raising."""
+    parent_id = "parent-005"
+    _make_codex_rollout(tmp_path / "good.jsonl", rollout_id=parent_id, cwd="/Users/me/proj")
+    bad = tmp_path / "torn.jsonl"
+    bad.parent.mkdir(parents=True, exist_ok=True)
+    bad.write_text('{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","pay')
+    monkeypatch.setattr("overclocked.detectors._CODEX_SESSIONS_DIR", tmp_path)
+    # Should not raise, and should still emit the good parent
+    sessions = list_codex_app_sessions(Config())
+    parent_ids = {s.session_id for s in sessions if not s.is_subagent}
+    assert parent_id in parent_ids
+
+
 # ── list_claude_app_sessions / list_claude_sessions ──────────────────────────
 
 
@@ -1200,9 +1364,11 @@ def test_codex_cli_status_exec_done(monkeypatch, tmp_path):
         '"payload":{"type":"task_complete"}}\n'
     )
     data = CodexTickData(
-        frozenset({"/Users/me/proj"}),
-        {"/Users/me/proj": rollout},
-        [],
+        cli_active_cwds=frozenset({"/Users/me/proj"}),
+        cli_rollout_by_cwd={"/Users/me/proj": rollout},
+        desktop_rows=[],
+        rollout_id_by_path={},
+        subagent_rows_by_parent={},
     )
     monkeypatch.setattr(d, "_ensure_codex_tick_data", lambda: data)
     monkeypatch.setattr(d, "_cpu_percent", lambda pid: 0.0)
@@ -1219,9 +1385,11 @@ def test_codex_cli_status_waiting_stale_transcript(monkeypatch, tmp_path):
         '{"id":"s","cwd":"/Users/me/p"}}\n'
     )
     data = CodexTickData(
-        frozenset({"/Users/me/p"}),
-        {"/Users/me/p": rollout},
-        [],
+        cli_active_cwds=frozenset({"/Users/me/p"}),
+        cli_rollout_by_cwd={"/Users/me/p": rollout},
+        desktop_rows=[],
+        rollout_id_by_path={},
+        subagent_rows_by_parent={},
     )
     monkeypatch.setattr(d, "_ensure_codex_tick_data", lambda: data)
     monkeypatch.setattr(d, "_cpu_percent", lambda pid: 0.0)

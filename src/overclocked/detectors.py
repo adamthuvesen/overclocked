@@ -62,6 +62,19 @@ class CodexTickData:
     #: Normalised cwd → rollout jsonl path (newest mtime wins per cwd)
     cli_rollout_by_cwd: dict[str, Path]
     desktop_rows: list[tuple[Path, float, str | None]]
+    #: rollout path → meta.id, populated for every fresh rollout we read.
+    rollout_id_by_path: dict[Path, str]
+    #: parent rollout id → live subagent rows.
+    subagent_rows_by_parent: dict[str, list[CodexSubagentRow]]
+
+
+@dataclass(frozen=True)
+class CodexSubagentRow:
+    child_id: str
+    mtime: float
+    cwd: str | None
+    agent_nickname: str | None
+    transcript_path: Path
 
 
 # Process table for current tick (None → ps axo failed, treat as no processes)
@@ -636,14 +649,32 @@ def _ensure_codex_tick_data() -> CodexTickData:
     now = time.time()
     active_cutoff = now - _ACTIVITY_WINDOW_SEC
     scan_cutoff = now - 86400  # 24h — desktop rows rely on transcript for freshness
+    subagent_cutoff = now - _SUBAGENT_LIVENESS_SEC
     cli_cwds: set[str] = set()
     cli_rollout_by_cwd: dict[str, Path] = {}
     desktop_rows: list[tuple[Path, float, str | None]] = []
+    rollout_id_by_path: dict[Path, str] = {}
+    subagent_rows_by_parent: dict[str, list[CodexSubagentRow]] = {}
     if _CODEX_SESSIONS_DIR.exists():
         for path, mtime in _jsonl_files_with_mtime(_CODEX_SESSIONS_DIR, scan_cutoff):
-            originator, meta_cwd = _codex_session_meta(path)
-            if _is_codex_desktop_originator(originator):
-                desktop_rows.append((path, mtime, meta_cwd))
+            meta = _codex_session_meta(path)
+            if meta.id:
+                rollout_id_by_path[path] = meta.id
+            if meta.parent_thread_id is not None:
+                # Subagent rollout — group under its parent if mtime is fresh.
+                if mtime >= subagent_cutoff and meta.id is not None:
+                    subagent_rows_by_parent.setdefault(meta.parent_thread_id, []).append(
+                        CodexSubagentRow(
+                            child_id=meta.id,
+                            mtime=mtime,
+                            cwd=meta.cwd,
+                            agent_nickname=meta.agent_nickname,
+                            transcript_path=path,
+                        ),
+                    )
+                continue
+            if _is_codex_desktop_originator(meta.originator):
+                desktop_rows.append((path, mtime, meta.cwd))
             elif mtime >= active_cutoff:
                 if not jsonl_transcript_recent(
                     path,
@@ -651,7 +682,7 @@ def _ensure_codex_tick_data() -> CodexTickData:
                     use_payload_timestamp=True,
                 ):
                     continue
-                nc = _normalise_cwd(meta_cwd)
+                nc = _normalise_cwd(meta.cwd)
                 if nc:
                     cli_cwds.add(nc)
                     prev = cli_rollout_by_cwd.get(nc)
@@ -664,10 +695,14 @@ def _ensure_codex_tick_data() -> CodexTickData:
                         except OSError:
                             cli_rollout_by_cwd[nc] = path
     desktop_rows.sort(key=lambda x: x[1], reverse=True)
+    for rows in subagent_rows_by_parent.values():
+        rows.sort(key=lambda r: r.child_id)  # deterministic order
     _codex_tick_data = CodexTickData(
         cli_active_cwds=frozenset(cli_cwds),
         cli_rollout_by_cwd=cli_rollout_by_cwd,
         desktop_rows=desktop_rows,
+        rollout_id_by_path=rollout_id_by_path,
+        subagent_rows_by_parent=subagent_rows_by_parent,
     )
     return _codex_tick_data
 
@@ -807,13 +842,28 @@ def _is_codex_desktop_originator(originator: str | None) -> bool:
     return originator.strip().casefold() == "codex desktop"
 
 
-def _codex_session_meta(session_file: Path) -> tuple[str | None, str | None]:
-    """Return (originator, cwd) from a session_meta line in the file prefix (not only line 1)."""
+@dataclass(frozen=True)
+class CodexRolloutMeta:
+    originator: str | None
+    cwd: str | None
+    id: str | None
+    parent_thread_id: str | None  # set iff this rollout is a subagent
+    agent_nickname: str | None
+
+
+def _codex_session_meta(session_file: Path) -> CodexRolloutMeta:
+    """Parse a Codex rollout's session_meta record from the file prefix.
+
+    Reads the first ~64 KiB and walks records until a ``session_meta`` is
+    found (it is line 1 in practice, but malformed leading lines are tolerated).
+    On parse failure (torn writes, missing meta line) returns a record with all
+    fields ``None`` — callers must not assume any field is set.
+    """
     try:
         with open(session_file, errors="replace") as f:
             head = f.read(_CODEX_META_SCAN_BYTES)
     except OSError:
-        return None, None
+        return CodexRolloutMeta(None, None, None, None, None)
     for line in head.splitlines():
         line = line.strip()
         if not line:
@@ -822,15 +872,27 @@ def _codex_session_meta(session_file: Path) -> tuple[str | None, str | None]:
             d = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if not isinstance(d, dict):
-            continue
-        if d.get("type") != "session_meta":
+        if not isinstance(d, dict) or d.get("type") != "session_meta":
             continue
         payload = d.get("payload")
         if not isinstance(payload, dict):
             continue
-        return payload.get("originator"), payload.get("cwd")
-    return None, None
+        parent_id = None
+        source = payload.get("source")
+        if isinstance(source, dict):
+            sub = source.get("subagent")
+            if isinstance(sub, dict):
+                ts = sub.get("thread_spawn")
+                if isinstance(ts, dict):
+                    parent_id = ts.get("parent_thread_id")
+        return CodexRolloutMeta(
+            originator=payload.get("originator"),
+            cwd=payload.get("cwd"),
+            id=payload.get("id"),
+            parent_thread_id=parent_id,
+            agent_nickname=payload.get("agent_nickname"),
+        )
+    return CodexRolloutMeta(None, None, None, None, None)
 
 
 def _normalise_cwd(cwd: str | None) -> str | None:
@@ -1259,9 +1321,49 @@ def _merge_cursor_editor_and_agent(
     return list(by_norm.values()) + subagents
 
 
-def list_codex_sessions() -> list[Session]:
+def _list_live_codex_subagents_for_parents(parents: list[Session]) -> list[Session]:
+    """Synthesise rows for live Codex subagents whose parent_thread_id matches one of ``parents``.
+
+    Uses the tick-cached ``CodexTickData.subagent_rows_by_parent`` index — populated
+    once per tick by ``_ensure_codex_tick_data``. A child rollout is "live" if its
+    mtime is within ``_SUBAGENT_LIVENESS_SEC`` (already filtered during indexing).
+    """
+    if not _CODEX_SESSIONS_DIR.exists():
+        return []
+    data = _ensure_codex_tick_data()
+    if not data.subagent_rows_by_parent:
+        return []
+    out: list[Session] = []
+    now = time.time()
+    for parent in parents:
+        if parent.session_id is None:
+            continue
+        rows = data.subagent_rows_by_parent.get(parent.session_id)
+        if not rows:
+            continue
+        for row in rows:
+            status = "working" if (now - row.mtime) < _STATUS_RECENCY_SEC else "waiting"
+            out.append(
+                Session(
+                    tool="codex",
+                    pid=_synthetic_pid_str(f"codex-subagent:{row.child_id}"),
+                    cwd=row.cwd or parent.cwd,
+                    project=parent.project,
+                    synthetic=True,
+                    status=status,
+                    transcript_path=row.transcript_path,
+                    is_subagent=True,
+                    parent_session_id=parent.session_id,
+                    agent_id=row.child_id,
+                ),
+            )
+    return out
+
+
+def list_codex_sessions(config: Config | None = None) -> list[Session]:
     """Detect interactive Codex CLI sessions, excluding daemon."""
-    sessions = []
+    parents: list[Session] = []
+    data = _ensure_codex_tick_data() if _CODEX_SESSIONS_DIR.exists() else None
     for pid in _pgrep(r"codex( |$)"):
         argv = _argv(pid)
         if "codex-companion" in argv:
@@ -1276,23 +1378,34 @@ def list_codex_sessions() -> list[Session]:
         if not codex_cli_session_is_active(pid):
             continue
         cwd = _resolve_cwd_cached(pid)
-        sessions.append(
+        session_id: str | None = None
+        if data is not None:
+            nc = _normalise_cwd(cwd)
+            if nc is not None:
+                rollout = data.cli_rollout_by_cwd.get(nc)
+                if rollout is not None:
+                    session_id = data.rollout_id_by_path.get(rollout)
+        parents.append(
             Session(
                 tool="codex",
                 pid=pid,
                 cwd=cwd,
                 status=_codex_cli_session_status(pid, cwd, argv),
+                session_id=session_id,
             ),
         )
-    return _dedupe_codex_cli_sessions(sessions)
+    parents = _dedupe_codex_cli_sessions(parents)
+    if config is not None and not config.show_subagents:
+        return parents
+    return parents + _list_live_codex_subagents_for_parents(parents)
 
 
-def list_codex_app_sessions() -> list[Session]:
+def list_codex_app_sessions(config: Config | None = None) -> list[Session]:
     """Detect active Codex Desktop app sessions via recent session files."""
     if not _CODEX_SESSIONS_DIR.exists():
         return []
     data = _ensure_codex_tick_data()
-    sessions = []
+    parents: list[Session] = []
     seen_keys: set[str] = set()
     for path, _mtime, cwd in data.desktop_rows:
         norm_cwd = _normalise_cwd(cwd)
@@ -1304,7 +1417,7 @@ def list_codex_app_sessions() -> list[Session]:
             continue
         pid = _synthetic_pid(path)
         st = _codex_app_file_session_status(path)
-        sessions.append(
+        parents.append(
             Session(
                 tool="codex",
                 pid=pid,
@@ -1312,9 +1425,12 @@ def list_codex_app_sessions() -> list[Session]:
                 status=st,
                 transcript_path=path,
                 synthetic=True,
+                session_id=data.rollout_id_by_path.get(path),
             ),
         )
-    return sessions
+    if config is not None and not config.show_subagents:
+        return parents
+    return parents + _list_live_codex_subagents_for_parents(parents)
 
 
 def _clear_session_metrics(s: Session) -> None:
@@ -1375,8 +1491,8 @@ def list_all_sessions(config: Config | None = None) -> list[Session]:
     return (
         list_claude_sessions(config)
         + _merge_cursor_editor_and_agent(cursor_ed, cursor_ag)
-        + list_codex_sessions()
-        + list_codex_app_sessions()
+        + list_codex_sessions(config)
+        + list_codex_app_sessions(config)
     )
 
 
