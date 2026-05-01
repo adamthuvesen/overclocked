@@ -281,6 +281,22 @@ def test_list_cursor_agent_sessions_populates_session_id(tmp_path, monkeypatch):
     assert sessions[0].session_id == sid
 
 
+def test_list_cursor_agent_sessions_dedupes_empty_window_mirror(tmp_path, monkeypatch):
+    """Cursor can mirror an active workspace agent into empty-window; keep the real project."""
+    sid = "11111111-2222-3333-4444-555555555555"
+    _make_cursor_workspace(
+        tmp_path, project_slug="Users-me-dev-proj", cwd="/Users/me/dev/proj", session_id=sid
+    )
+    _make_cursor_workspace(tmp_path, project_slug="empty-window", cwd="/Users/me", session_id=sid)
+
+    monkeypatch.setattr("overclocked.detectors._CURSOR_PROJECTS_DIR", tmp_path)
+    sessions = list_cursor_agent_sessions()
+
+    assert len(sessions) == 1
+    assert sessions[0].cwd == "/Users/me/dev/proj"
+    assert sessions[0].session_id == sid
+
+
 def test_list_cursor_agent_sessions_attaches_live_subagents(tmp_path, monkeypatch):
     """A cursor_agent parent with two recent subagent jsonls emits two subagent rows."""
     sid = "11111111-2222-3333-4444-555555555555"
@@ -424,6 +440,14 @@ def test_list_cursor_editor_skips_when_only_mcps_fresh(tmp_path, monkeypatch):
     mcps = tmp_path / "Users-me-dev-proj" / "mcps"
     mcps.mkdir(parents=True)
     (mcps / "server.json").write_text("{}")
+    monkeypatch.setattr("overclocked.detectors._CURSOR_PROJECTS_DIR", tmp_path)
+    monkeypatch.setattr("overclocked.detectors._pgrep", lambda p: [7001])
+    assert list_cursor_editor_windows() == []
+
+
+def test_list_cursor_editor_skips_empty_window(tmp_path, monkeypatch):
+    """Cursor's empty-window state is not a workspace, even with a fresh terminal."""
+    _seed_cursor_project(tmp_path, "empty-window", "/Users/me")
     monkeypatch.setattr("overclocked.detectors._CURSOR_PROJECTS_DIR", tmp_path)
     monkeypatch.setattr("overclocked.detectors._pgrep", lambda p: [7001])
     assert list_cursor_editor_windows() == []

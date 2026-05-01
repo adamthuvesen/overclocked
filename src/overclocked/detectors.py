@@ -464,6 +464,24 @@ def _cursor_project_dir_for_cwd(cwd: str) -> Path | None:
     return None
 
 
+def _cursor_project_dir_matches_cwd(project_dir: Path, cwd: str) -> bool:
+    hit = _cursor_project_dir_for_cwd(cwd)
+    if hit is None:
+        return False
+    try:
+        return hit.resolve() == project_dir.resolve()
+    except OSError:
+        return False
+
+
+def _cursor_agent_candidate_rank(project_dir: Path, cwd: str) -> tuple[int, int, float, str]:
+    """Rank duplicate Cursor session mirrors; real workspace dirs beat empty-window."""
+    exact_workspace = 1 if _cursor_project_dir_matches_cwd(project_dir, cwd) else 0
+    named_workspace = 0 if project_dir.name == "empty-window" else 1
+    last_activity = _cursor_workspace_coarse_status_unix(project_dir) or 0.0
+    return (exact_workspace, named_workspace, last_activity, project_dir.name)
+
+
 def _latest_mtime_under(root: Path) -> float:
     """Newest mtime across top-level entries (files *and* sub-directories).
 
@@ -1154,6 +1172,8 @@ def list_cursor_editor_windows() -> list[Session]:
     for project_dir in _CURSOR_PROJECTS_DIR.iterdir():
         if not project_dir.is_dir():
             continue
+        if project_dir.name == "empty-window":
+            continue
         if not _cursor_editor_workspace_is_active(project_dir, cutoff):
             continue
         cwd = _cursor_project_workspace_cwd(project_dir)
@@ -1269,7 +1289,7 @@ def list_cursor_agent_sessions(config: Config | None = None) -> list[Session]:
     """Detect active Cursor background agent sessions via transcript mtimes."""
     if not _CURSOR_PROJECTS_DIR.exists():
         return []
-    sessions: list[Session] = []
+    candidates_by_session_id: dict[str, tuple[tuple[int, int, float, str], Session]] = {}
     activity_cutoff = time.time() - _ACTIVITY_WINDOW_SEC
     for project_dir in _CURSOR_PROJECTS_DIR.iterdir():
         if not project_dir.is_dir():
@@ -1284,16 +1304,20 @@ def list_cursor_agent_sessions(config: Config | None = None) -> list[Session]:
         if cwd is None:
             continue
         pid = _synthetic_pid(project_dir)
-        sessions.append(
-            Session(
-                tool="cursor_agent",
-                pid=pid,
-                cwd=cwd,
-                status=_cursor_coarse_status(project_dir),
-                synthetic=True,
-                session_id=session_id,
-            ),
+        rank = _cursor_agent_candidate_rank(project_dir, cwd)
+        session = Session(
+            tool="cursor_agent",
+            pid=pid,
+            cwd=cwd,
+            status=_cursor_coarse_status(project_dir),
+            synthetic=True,
+            session_id=session_id,
         )
+        existing = candidates_by_session_id.get(session_id)
+        if existing is None or rank > existing[0]:
+            candidates_by_session_id[session_id] = (rank, session)
+
+    sessions = [session for _rank, session in candidates_by_session_id.values()]
 
     if config is not None and not config.show_subagents:
         return sessions
