@@ -37,23 +37,23 @@ from overclocked.detectors import (
 
 def test_descendant_not_ralph(monkeypatch):
     """Normal process with no ralph ancestor returns False."""
+    import overclocked.detectors as d
+
     monkeypatch.setattr(
-        "overclocked.detectors._ps_info", lambda pid: ("/usr/bin/python3 script.py", None)
+        d, "_ps_table", {99999: d.PsRow(ppid=1, tty="??", pcpu=0.0, command="python3 script.py")}
     )
     assert not is_descendant_of(99999, ["ralph"])
 
 
 def test_descendant_is_ralph(monkeypatch):
     """Process with ralph in ancestor chain returns True."""
+    import overclocked.detectors as d
 
-    def fake_ps_info(pid: int):
-        if pid == 100:
-            return ("/usr/local/bin/ralph run", 1)
-        if pid == 200:
-            return (f"/usr/bin/something {pid}", 100)
-        return None
-
-    monkeypatch.setattr("overclocked.detectors._ps_info", fake_ps_info)
+    table = {
+        100: d.PsRow(ppid=1, tty="??", pcpu=0.0, command="/usr/local/bin/ralph run"),
+        200: d.PsRow(ppid=100, tty="??", pcpu=0.0, command="/usr/bin/something 200"),
+    }
+    monkeypatch.setattr(d, "_ps_table", table)
     assert is_descendant_of(200, ["ralph"])
 
 

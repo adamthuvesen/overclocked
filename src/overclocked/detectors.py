@@ -123,95 +123,52 @@ def _pgrep(pattern: str) -> list[int]:
 
 
 def _has_tty(pid: int) -> bool:
-    if _ps_table and pid in _ps_table:
-        tty = _ps_table[pid].tty.strip()
-        return bool(tty) and tty != "??"
-    out = _safe_check_output(["ps", "-p", str(pid), "-o", "tty="])
-    if out is None:
+    if not _ps_table or pid not in _ps_table:
         return False
-    stripped = out.strip()
-    return bool(stripped) and stripped != "??"
+    tty = _ps_table[pid].tty.strip()
+    return bool(tty) and tty != "??"
 
 
 def _argv(pid: int) -> str:
-    if _ps_table and pid in _ps_table:
-        return _ps_table[pid].command
-    out = _safe_check_output(["ps", "-p", str(pid), "-o", "command="])
-    return out.strip() if out is not None else ""
+    if not _ps_table or pid not in _ps_table:
+        return ""
+    return _ps_table[pid].command
 
 
 def _ppid(pid: int) -> int | None:
-    if _ps_table and pid in _ps_table:
-        return _ps_table[pid].ppid
-    out = _safe_check_output(["ps", "-p", str(pid), "-o", "ppid="])
-    if out is None:
+    if not _ps_table or pid not in _ps_table:
         return None
-    try:
-        return int(out.strip())
-    except ValueError:
-        return None
+    return _ps_table[pid].ppid
 
 
 def _cpu_percent(pid: int) -> float:
-    if _ps_table and pid in _ps_table:
-        return _ps_table[pid].pcpu
-    out = _safe_check_output(["ps", "-p", str(pid), "-o", "%cpu="])
-    if out is None:
+    if not _ps_table or pid not in _ps_table:
         return 0.0
-    try:
-        return float(out.strip())
-    except ValueError:
-        return 0.0
+    return _ps_table[pid].pcpu
 
 
 def _ps_info(pid: int) -> tuple[str, int] | None:
-    if _ps_table and pid in _ps_table:
-        row = _ps_table[pid]
-        return row.command, row.ppid
-    out = _safe_check_output(["ps", "-p", str(pid), "-o", "ppid=,command="])
-    if out is None:
+    if not _ps_table or pid not in _ps_table:
         return None
-    stripped = out.strip()
-    if not stripped:
-        return None
-    parts = stripped.split(None, 1)
-    if len(parts) < 2:
-        return None
-    try:
-        return parts[1], int(parts[0])
-    except ValueError:
-        return None
+    row = _ps_table[pid]
+    return row.command, row.ppid
 
 
 def is_descendant_of(pid: int, names: list[str]) -> bool:
     """Return True if any ancestor process has a name matching names."""
-    if _ps_table:
-        visited: set[int] = set()
-        current = pid
-        while current and current not in visited:
-            visited.add(current)
-            row = _ps_table.get(current)
-            if row is None:
-                break
-            if any(name.lower() in row.command.lower() for name in names):
-                return True
-            parent = row.ppid
-            if parent <= 1 or parent == current:
-                break
-            current = parent
+    if not _ps_table:
         return False
-
-    visited = set()
+    visited: set[int] = set()
     current = pid
     while current and current not in visited:
         visited.add(current)
-        info = _ps_info(current)
-        if info is None:
+        row = _ps_table.get(current)
+        if row is None:
             break
-        cmd, parent = info
-        if any(name.lower() in cmd.lower() for name in names):
+        if any(name.lower() in row.command.lower() for name in names):
             return True
-        if parent is None or parent == current or parent <= 1:
+        parent = row.ppid
+        if parent <= 1 or parent == current:
             break
         current = parent
     return False
