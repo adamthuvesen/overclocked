@@ -12,7 +12,7 @@ import sqlite3
 import sys
 import time
 import traceback
-from datetime import datetime
+from datetime import UTC, datetime
 
 from overclocked.config import Config, load_config
 from overclocked.detectors import Session, raw_session_keys, stable_sessions_from_keys, tick
@@ -87,7 +87,7 @@ def _log_exception(exc: BaseException) -> None:
     try:
         error_log = runtime_home() / "error.log"
         error_log.parent.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now().isoformat(timespec="seconds")
+        ts = datetime.now(UTC).isoformat(timespec="seconds")
         first_line = str(exc).splitlines()[0] if str(exc) else type(exc).__name__
         tb = traceback.format_exc()
         with error_log.open("a") as f:
