@@ -26,6 +26,7 @@ from overclocked.detectors import (
     list_claude_sessions,
     list_codex_app_sessions,
     list_codex_sessions,
+    list_cursor_agent_cli_sessions,
     list_cursor_agent_sessions,
     list_cursor_editor_windows,
     raw_session_keys,
@@ -250,6 +251,132 @@ def test_list_cursor_agent_sessions_skips_projects_without_cwd(tmp_path, monkeyp
     assert sessions == []
 
 
+def _make_cursor_workspace(
+    tmp_path: Path,
+    *,
+    project_slug: str,
+    cwd: str,
+    session_id: str,
+) -> Path:
+    """Build a minimal Cursor workspace dir with a fresh parent transcript."""
+    proj = tmp_path / project_slug
+    transcripts = proj / "agent-transcripts" / session_id
+    transcripts.mkdir(parents=True)
+    (transcripts / f"{session_id}.jsonl").write_text("{}")
+    terminals = proj / "terminals"
+    terminals.mkdir()
+    (terminals / "1.txt").write_text(f"---\npid: 99\ncwd: {cwd}\n")
+    return proj
+
+
+def test_list_cursor_agent_sessions_populates_session_id(tmp_path, monkeypatch):
+    """Parent cursor_agent rows carry session_id derived from the transcript dir name."""
+    sid = "11111111-2222-3333-4444-555555555555"
+    _make_cursor_workspace(
+        tmp_path, project_slug="Users-me-dev-proj", cwd="/Users/me/dev/proj", session_id=sid
+    )
+    monkeypatch.setattr("overclocked.detectors._CURSOR_PROJECTS_DIR", tmp_path)
+    sessions = list_cursor_agent_sessions()
+    assert len(sessions) == 1
+    assert sessions[0].session_id == sid
+
+
+def test_list_cursor_agent_sessions_attaches_live_subagents(tmp_path, monkeypatch):
+    """A cursor_agent parent with two recent subagent jsonls emits two subagent rows."""
+    sid = "11111111-2222-3333-4444-555555555555"
+    proj = _make_cursor_workspace(
+        tmp_path, project_slug="Users-me-dev-proj", cwd="/Users/me/dev/proj", session_id=sid
+    )
+    sub_dir = proj / "agent-transcripts" / sid / "subagents"
+    sub_dir.mkdir()
+    (sub_dir / "aaa1.jsonl").write_text("{}")
+    (sub_dir / "bbb2.jsonl").write_text("{}")
+
+    monkeypatch.setattr("overclocked.detectors._CURSOR_PROJECTS_DIR", tmp_path)
+    sessions = list_cursor_agent_sessions(Config())
+
+    parents = [s for s in sessions if not s.is_subagent]
+    children = [s for s in sessions if s.is_subagent]
+    assert len(parents) == 1
+    assert parents[0].session_id == sid
+    assert len(children) == 2
+    assert {c.agent_id for c in children} == {"aaa1", "bbb2"}
+    assert all(c.parent_session_id == sid for c in children)
+    assert all(c.tool == "cursor_agent" for c in children)
+    assert all(c.cwd == "/Users/me/dev/proj" for c in children)
+    assert all(c.synthetic for c in children)
+
+
+def test_list_cursor_agent_sessions_ignores_stale_subagents(tmp_path, monkeypatch):
+    """Subagent jsonls older than the liveness window are not emitted."""
+    import os
+
+    sid = "11111111-2222-3333-4444-555555555555"
+    proj = _make_cursor_workspace(
+        tmp_path, project_slug="Users-me-dev-proj", cwd="/Users/me/dev/proj", session_id=sid
+    )
+    sub_dir = proj / "agent-transcripts" / sid / "subagents"
+    sub_dir.mkdir()
+    fresh = sub_dir / "fresh.jsonl"
+    stale = sub_dir / "stale.jsonl"
+    fresh.write_text("{}")
+    stale.write_text("{}")
+    old = time.time() - 2000
+    os.utime(stale, (old, old))
+
+    monkeypatch.setattr("overclocked.detectors._CURSOR_PROJECTS_DIR", tmp_path)
+    sessions = list_cursor_agent_sessions(Config())
+    children = [s for s in sessions if s.is_subagent]
+    assert [c.agent_id for c in children] == ["fresh"]
+
+
+def test_list_cursor_agent_sessions_show_subagents_false_omits_children(tmp_path, monkeypatch):
+    """show_subagents=False suppresses Cursor subagent rows."""
+    sid = "deadbeef-0000-0000-0000-000000000000"
+    proj = _make_cursor_workspace(
+        tmp_path, project_slug="Users-me-dev-proj", cwd="/Users/me/dev/proj", session_id=sid
+    )
+    sub_dir = proj / "agent-transcripts" / sid / "subagents"
+    sub_dir.mkdir()
+    (sub_dir / "x.jsonl").write_text("{}")
+
+    monkeypatch.setattr("overclocked.detectors._CURSOR_PROJECTS_DIR", tmp_path)
+    sessions = list_cursor_agent_sessions(Config(show_subagents=False))
+    assert all(not s.is_subagent for s in sessions)
+
+
+# ── list_cursor_agent_cli_sessions ───────────────────────────────────────────
+
+
+def test_list_cursor_agent_cli_sessions_detects_running_process(monkeypatch):
+    monkeypatch.setattr("overclocked.detectors._pgrep", lambda p: [4242])
+    monkeypatch.setattr("overclocked.detectors._has_tty", lambda pid: True)
+    monkeypatch.setattr("overclocked.detectors.is_descendant_of", lambda pid, names: False)
+    monkeypatch.setattr("overclocked.detectors._resolve_cwd_cached", lambda pid: "/Users/me/proj")
+    sessions = list_cursor_agent_cli_sessions()
+    assert len(sessions) == 1
+    assert sessions[0].pid == 4242
+    assert sessions[0].tool == "cursor_agent"
+    assert sessions[0].cwd == "/Users/me/proj"
+    assert sessions[0].session_id is None  # CLI variant has no transcript-derived id
+
+
+def test_list_cursor_agent_cli_sessions_skips_no_tty(monkeypatch):
+    monkeypatch.setattr("overclocked.detectors._pgrep", lambda p: [4242])
+    monkeypatch.setattr("overclocked.detectors._has_tty", lambda pid: False)
+    monkeypatch.setattr("overclocked.detectors.is_descendant_of", lambda pid, names: False)
+    monkeypatch.setattr("overclocked.detectors._resolve_cwd_cached", lambda pid: "/Users/me/proj")
+    assert list_cursor_agent_cli_sessions() == []
+
+
+def test_cursor_agent_cli_dedupes_with_ide_agent_same_cwd():
+    """A CLI cursor_agent and an IDE cursor_agent in the same cwd collapse to one row."""
+    cli = Session(tool="cursor_agent", pid=4242, cwd="/Users/me/proj")
+    ide = Session(tool="cursor_agent", pid=99, cwd="/Users/me/proj", synthetic=True)
+    merged = _merge_cursor_editor_and_agent(editor=[], agent=[ide, cli])
+    assert len(merged) == 1
+
+
 # ── list_cursor_editor_windows ────────────────────────────────────────────────
 
 
@@ -452,9 +579,30 @@ def test_codex_session_meta_found_after_non_meta_preamble(tmp_path, monkeypatch)
     assert sessions[0].cwd == "/Users/me/proj"
 
 
-def test_list_codex_app_sessions_skips_tui(tmp_path, monkeypatch):
+def test_list_codex_app_sessions_includes_tui(tmp_path, monkeypatch):
+    """codex-tui is a file-backed surface — emit one row from the rollout walk."""
     f = tmp_path / "session-tui.jsonl"
     _make_codex_session(f, "/Users/me/proj", originator="codex-tui")
+    monkeypatch.setattr("overclocked.detectors._CODEX_SESSIONS_DIR", tmp_path)
+    sessions = list_codex_app_sessions()
+    assert len(sessions) == 1
+    assert sessions[0].cwd == "/Users/me/proj"
+
+
+def test_list_codex_app_sessions_includes_vscode(tmp_path, monkeypatch):
+    """codex_vscode (IDE-embedded) is also file-backed — emit one row."""
+    f = tmp_path / "session-vscode.jsonl"
+    _make_codex_session(f, "/Users/me/proj", originator="codex_vscode")
+    monkeypatch.setattr("overclocked.detectors._CODEX_SESSIONS_DIR", tmp_path)
+    sessions = list_codex_app_sessions()
+    assert len(sessions) == 1
+    assert sessions[0].cwd == "/Users/me/proj"
+
+
+def test_list_codex_app_sessions_skips_codex_exec(tmp_path, monkeypatch):
+    """codex_exec one-shots stay outside the file-backed parent set."""
+    f = tmp_path / "session-exec.jsonl"
+    _make_codex_session(f, "/Users/me/proj", originator="codex_exec")
     monkeypatch.setattr("overclocked.detectors._CODEX_SESSIONS_DIR", tmp_path)
     sessions = list_codex_app_sessions()
     assert sessions == []
@@ -510,6 +658,170 @@ def test_list_codex_app_sessions_none_cwd_distinct(tmp_path, monkeypatch):
     assert len(sessions) == 2
 
 
+# ── Codex subagent grouping ───────────────────────────────────────────────────
+
+
+def _make_codex_rollout(
+    path: Path,
+    *,
+    rollout_id: str,
+    cwd: str,
+    originator: str = "Codex Desktop",
+    parent_thread_id: str | None = None,
+    agent_nickname: str | None = None,
+) -> None:
+    """Write a Codex rollout file with a session_meta first line.
+
+    When ``parent_thread_id`` is set, the meta carries the
+    ``source.subagent.thread_spawn`` variant — that's the on-disk subagent signal.
+    """
+    import json
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict = {"id": rollout_id, "cwd": cwd, "originator": originator}
+    if parent_thread_id is not None:
+        payload["source"] = {
+            "subagent": {"thread_spawn": {"parent_thread_id": parent_thread_id, "depth": 1}}
+        }
+    if agent_nickname is not None:
+        payload["agent_nickname"] = agent_nickname
+    record = {"timestamp": _iso_now_z(), "type": "session_meta", "payload": payload}
+    path.write_text(json.dumps(record) + "\n")
+
+
+def test_list_codex_app_sessions_populates_session_id(tmp_path, monkeypatch):
+    f = tmp_path / "rollout-parent.jsonl"
+    _make_codex_rollout(f, rollout_id="parent-001", cwd="/Users/me/proj")
+    monkeypatch.setattr("overclocked.detectors._CODEX_SESSIONS_DIR", tmp_path)
+    sessions = list_codex_app_sessions()
+    assert len(sessions) == 1
+    assert sessions[0].session_id == "parent-001"
+
+
+def test_list_codex_app_sessions_attaches_live_subagents(tmp_path, monkeypatch):
+    """Parent rollout + two fresh subagent rollouts → two is_subagent rows."""
+    parent_id = "parent-001"
+    _make_codex_rollout(
+        tmp_path / "rollout-parent.jsonl",
+        rollout_id=parent_id,
+        cwd="/Users/me/proj",
+    )
+    _make_codex_rollout(
+        tmp_path / "rollout-child-a.jsonl",
+        rollout_id="child-a",
+        cwd="/Users/me/proj",
+        originator="codex_cli_rs",
+        parent_thread_id=parent_id,
+        agent_nickname="reviewer",
+    )
+    _make_codex_rollout(
+        tmp_path / "rollout-child-b.jsonl",
+        rollout_id="child-b",
+        cwd="/Users/me/proj",
+        originator="codex_cli_rs",
+        parent_thread_id=parent_id,
+    )
+    monkeypatch.setattr("overclocked.detectors._CODEX_SESSIONS_DIR", tmp_path)
+    sessions = list_codex_app_sessions(Config())
+
+    parents = [s for s in sessions if not s.is_subagent]
+    children = [s for s in sessions if s.is_subagent]
+    assert len(parents) == 1
+    assert parents[0].session_id == parent_id
+    assert len(children) == 2
+    assert {c.agent_id for c in children} == {"child-a", "child-b"}
+    assert all(c.parent_session_id == parent_id for c in children)
+    assert all(c.tool == "codex" for c in children)
+    assert all(c.synthetic for c in children)
+
+
+def test_list_codex_app_sessions_ignores_stale_subagents(tmp_path, monkeypatch):
+    import os
+
+    parent_id = "parent-002"
+    _make_codex_rollout(tmp_path / "p.jsonl", rollout_id=parent_id, cwd="/Users/me/proj")
+    fresh = tmp_path / "fresh.jsonl"
+    stale = tmp_path / "stale.jsonl"
+    _make_codex_rollout(
+        fresh,
+        rollout_id="fresh",
+        cwd="/Users/me/proj",
+        originator="codex_cli_rs",
+        parent_thread_id=parent_id,
+    )
+    _make_codex_rollout(
+        stale,
+        rollout_id="stale",
+        cwd="/Users/me/proj",
+        originator="codex_cli_rs",
+        parent_thread_id=parent_id,
+    )
+    old = time.time() - 2000
+    os.utime(stale, (old, old))
+    monkeypatch.setattr("overclocked.detectors._CODEX_SESSIONS_DIR", tmp_path)
+
+    sessions = list_codex_app_sessions(Config())
+    children = [s for s in sessions if s.is_subagent]
+    assert [c.agent_id for c in children] == ["fresh"]
+
+
+def test_list_codex_app_sessions_show_subagents_false_omits_children(tmp_path, monkeypatch):
+    parent_id = "parent-003"
+    _make_codex_rollout(tmp_path / "p.jsonl", rollout_id=parent_id, cwd="/Users/me/proj")
+    _make_codex_rollout(
+        tmp_path / "c.jsonl",
+        rollout_id="c",
+        cwd="/Users/me/proj",
+        originator="codex_cli_rs",
+        parent_thread_id=parent_id,
+    )
+    monkeypatch.setattr("overclocked.detectors._CODEX_SESSIONS_DIR", tmp_path)
+    sessions = list_codex_app_sessions(Config(show_subagents=False))
+    assert all(not s.is_subagent for s in sessions)
+
+
+def test_list_codex_app_sessions_ignores_forked_from_id(tmp_path, monkeypatch):
+    """A rollout with forked_from_id but no subagent source is a normal parent, not a subagent."""
+    import json
+
+    forked = tmp_path / "forked.jsonl"
+    forked.parent.mkdir(parents=True, exist_ok=True)
+    forked.write_text(
+        json.dumps(
+            {
+                "timestamp": _iso_now_z(),
+                "type": "session_meta",
+                "payload": {
+                    "id": "forked-001",
+                    "cwd": "/Users/me/forked-proj",
+                    "originator": "Codex Desktop",
+                    "forked_from_id": "some-other-session",
+                },
+            }
+        )
+        + "\n"
+    )
+    monkeypatch.setattr("overclocked.detectors._CODEX_SESSIONS_DIR", tmp_path)
+    sessions = list_codex_app_sessions(Config())
+    assert len(sessions) == 1
+    assert sessions[0].session_id == "forked-001"
+    assert sessions[0].is_subagent is False
+
+
+def test_codex_classifier_handles_torn_first_line(tmp_path, monkeypatch):
+    """Half-written first line in a rollout is skipped without raising."""
+    parent_id = "parent-005"
+    _make_codex_rollout(tmp_path / "good.jsonl", rollout_id=parent_id, cwd="/Users/me/proj")
+    bad = tmp_path / "torn.jsonl"
+    bad.parent.mkdir(parents=True, exist_ok=True)
+    bad.write_text('{"timestamp":"2026-01-01T00:00:00Z","type":"session_meta","pay')
+    monkeypatch.setattr("overclocked.detectors._CODEX_SESSIONS_DIR", tmp_path)
+    # Should not raise, and should still emit the good parent
+    sessions = list_codex_app_sessions(Config())
+    parent_ids = {s.session_id for s in sessions if not s.is_subagent}
+    assert parent_id in parent_ids
+
+
 # ── list_claude_app_sessions / list_claude_sessions ──────────────────────────
 
 
@@ -539,6 +851,23 @@ def test_list_claude_app_sessions_ignores_old_file(tmp_path, monkeypatch):
     os.utime(f, (old, old))
     monkeypatch.setattr("overclocked.detectors._CLAUDE_PROJECTS_DIR", tmp_path)
     assert list_claude_app_sessions() == []
+
+
+def test_list_claude_app_sessions_ignores_subagent_files(tmp_path, monkeypatch):
+    """Subagent jsonls inherit ``entrypoint=claude-desktop`` from their parent.
+
+    They live at ``<project>/<sessionId>/subagents/agent-*.jsonl`` and must not
+    be mistaken for top-level desktop sessions — the parent already covers them
+    and rendering surfaces them as nested children.
+    """
+    parent_file = tmp_path / "-Users-me-dev-proj" / "session-1.jsonl"
+    _make_claude_session(parent_file, "/Users/me/dev/proj", session_id="session-1")
+    sub_file = tmp_path / "-Users-me-dev-proj" / "session-1" / "subagents" / "agent-abc.jsonl"
+    _make_claude_session(sub_file, "/Users/me/dev/proj", session_id="session-1")
+    monkeypatch.setattr("overclocked.detectors._CLAUDE_PROJECTS_DIR", tmp_path)
+    sessions = list_claude_app_sessions()
+    assert len(sessions) == 1
+    assert sessions[0].transcript_path == parent_file
 
 
 def test_list_claude_app_sessions_counts_recent_files_not_helper_pids(tmp_path, monkeypatch):
@@ -668,6 +997,135 @@ def test_list_claude_sessions_keeps_tty_when_cwd_unresolved_desktop_present(monk
     assert by_pid[9].cwd is None
 
 
+# ── subagent discovery ────────────────────────────────────────────────────────
+
+
+def _make_subagent_jsonl(path: Path, *, parent_sid: str, agent_id: str) -> None:
+    """Write a minimal subagent jsonl line at ``path``."""
+    import json
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "type": "user",
+        "isSidechain": True,
+        "agentId": agent_id,
+        "sessionId": parent_sid,
+        "timestamp": _iso_now_z(),
+    }
+    path.write_text(json.dumps(record) + "\n")
+
+
+def test_list_claude_sessions_attaches_live_subagents(tmp_path, monkeypatch):
+    """Parent desktop session with two recent subagent jsonls → two subagent rows."""
+    parent_sid = "11111111-2222-3333-4444-555555555555"
+    proj = tmp_path / "-Users-me-dev-proj"
+    parent_jsonl = proj / f"{parent_sid}.jsonl"
+    _make_claude_session(parent_jsonl, "/Users/me/dev/proj", session_id=parent_sid)
+    sub_dir = proj / parent_sid / "subagents"
+    _make_subagent_jsonl(sub_dir / "agent-aaa1.jsonl", parent_sid=parent_sid, agent_id="aaa1")
+    _make_subagent_jsonl(sub_dir / "agent-bbb2.jsonl", parent_sid=parent_sid, agent_id="bbb2")
+
+    monkeypatch.setattr("overclocked.detectors._CLAUDE_PROJECTS_DIR", tmp_path)
+    monkeypatch.setattr("overclocked.detectors._claude_pgrep_all", lambda: [])
+    sessions = list_claude_sessions(Config())
+
+    parents = [s for s in sessions if not s.is_subagent]
+    children = [s for s in sessions if s.is_subagent]
+    assert len(parents) == 1
+    assert parents[0].session_id == parent_sid
+    assert len(children) == 2
+    assert {c.agent_id for c in children} == {"aaa1", "bbb2"}
+    assert all(c.parent_session_id == parent_sid for c in children)
+    assert all(c.cwd == "/Users/me/dev/proj" for c in children)
+    assert all(c.synthetic for c in children)
+
+
+def test_list_claude_sessions_filters_stale_subagents(tmp_path, monkeypatch):
+    """Subagent jsonl with mtime outside the activity window is dropped."""
+    import os
+
+    parent_sid = "11111111-2222-3333-4444-555555555555"
+    proj = tmp_path / "-Users-me-dev-proj"
+    parent_jsonl = proj / f"{parent_sid}.jsonl"
+    _make_claude_session(parent_jsonl, "/Users/me/dev/proj", session_id=parent_sid)
+    sub_dir = proj / parent_sid / "subagents"
+    fresh = sub_dir / "agent-fresh.jsonl"
+    stale = sub_dir / "agent-stale.jsonl"
+    _make_subagent_jsonl(fresh, parent_sid=parent_sid, agent_id="fresh")
+    _make_subagent_jsonl(stale, parent_sid=parent_sid, agent_id="stale")
+    old = time.time() - 2000
+    os.utime(stale, (old, old))
+
+    monkeypatch.setattr("overclocked.detectors._CLAUDE_PROJECTS_DIR", tmp_path)
+    monkeypatch.setattr("overclocked.detectors._claude_pgrep_all", lambda: [])
+    sessions = list_claude_sessions(Config())
+
+    children = [s for s in sessions if s.is_subagent]
+    assert [c.agent_id for c in children] == ["fresh"]
+
+
+def test_list_claude_sessions_drops_subagents_after_60s_quiet(tmp_path, monkeypatch):
+    """A subagent silent for 60s is dropped, even though the parent's 5-min window persists.
+
+    Verifies subagents disappear well before the parent activity window expires.
+    """
+    import os
+
+    parent_sid = "22222222-3333-4444-5555-666666666666"
+    proj = tmp_path / "-Users-me-dev-proj"
+    _make_claude_session(proj / f"{parent_sid}.jsonl", "/Users/me/dev/proj", session_id=parent_sid)
+    sub_dir = proj / parent_sid / "subagents"
+    quiet = sub_dir / "agent-quiet.jsonl"
+    _make_subagent_jsonl(quiet, parent_sid=parent_sid, agent_id="quiet")
+    sixty_sec_ago = time.time() - 60
+    os.utime(quiet, (sixty_sec_ago, sixty_sec_ago))
+
+    monkeypatch.setattr("overclocked.detectors._CLAUDE_PROJECTS_DIR", tmp_path)
+    monkeypatch.setattr("overclocked.detectors._claude_pgrep_all", lambda: [])
+    sessions = list_claude_sessions(Config())
+
+    parents = [s for s in sessions if not s.is_subagent]
+    children = [s for s in sessions if s.is_subagent]
+    assert len(parents) == 1  # parent still shown (5-min window not yet exceeded)
+    assert children == []  # subagent dropped after the tighter 30s window
+
+
+def test_list_claude_sessions_finds_subagents_under_dotted_cwd(tmp_path, monkeypatch):
+    """Worktree-style cwds (containing ``.``/``_``) resolve to the right project dir.
+
+    Claude Code encodes the cwd by replacing ``/``, ``.``, and ``_`` with ``-``,
+    so ``/Users/me/dev/x/.claude/wt`` lands at ``-Users-me-dev-x--claude-wt``.
+    Earlier code only replaced ``/`` and silently failed for these paths.
+    """
+    parent_sid = "abcdef00-1111-2222-3333-444444444444"
+    proj = tmp_path / "-Users-me-dev-x--claude-wt"
+    parent_jsonl = proj / f"{parent_sid}.jsonl"
+    _make_claude_session(parent_jsonl, "/Users/me/dev/x/.claude/wt", session_id=parent_sid)
+    sub_dir = proj / parent_sid / "subagents"
+    _make_subagent_jsonl(sub_dir / "agent-aaa1.jsonl", parent_sid=parent_sid, agent_id="aaa1")
+
+    monkeypatch.setattr("overclocked.detectors._CLAUDE_PROJECTS_DIR", tmp_path)
+    monkeypatch.setattr("overclocked.detectors._claude_pgrep_all", lambda: [])
+    sessions = list_claude_sessions(Config())
+    children = [s for s in sessions if s.is_subagent]
+    assert [c.agent_id for c in children] == ["aaa1"]
+
+
+def test_list_claude_sessions_show_subagents_false_omits_children(tmp_path, monkeypatch):
+    """show_subagents=False suppresses subagent rows."""
+    parent_sid = "deadbeef-0000-0000-0000-000000000000"
+    proj = tmp_path / "-Users-me-dev-proj"
+    _make_claude_session(proj / f"{parent_sid}.jsonl", "/Users/me/dev/proj", session_id=parent_sid)
+    sub_dir = proj / parent_sid / "subagents"
+    _make_subagent_jsonl(sub_dir / "agent-x.jsonl", parent_sid=parent_sid, agent_id="x")
+
+    monkeypatch.setattr("overclocked.detectors._CLAUDE_PROJECTS_DIR", tmp_path)
+    monkeypatch.setattr("overclocked.detectors._claude_pgrep_all", lambda: [])
+    sessions = list_claude_sessions(Config(show_subagents=False))
+
+    assert all(not s.is_subagent for s in sessions)
+
+
 # ── _claude_pgrep_all (single call per tick) ──────────────────────────────────
 
 
@@ -757,7 +1215,7 @@ def test_list_codex_cli_drops_stale_session_file(tmp_path, monkeypatch):
 
 def test_list_codex_cli_keeps_recent_session_file(tmp_path, monkeypatch):
     f = tmp_path / "cli.jsonl"
-    _make_codex_session(f, "/Users/me/proj", originator="codex-tui")
+    _make_codex_session(f, "/Users/me/proj", originator="codex_cli_rs")
 
     monkeypatch.setattr("overclocked.detectors._pgrep", lambda p: [9005])
     monkeypatch.setattr("overclocked.detectors._argv", lambda pid: "codex run")
@@ -852,7 +1310,8 @@ def test_claude_cli_inactive_stale_agent_transcript(tmp_path, monkeypatch):
 
 def test_tick_first_tick_returns_nothing(monkeypatch):
     monkeypatch.setattr(
-        "overclocked.detectors.list_all_sessions", lambda: [Session(tool="claude", pid=1)]
+        "overclocked.detectors.list_all_sessions",
+        lambda config=None: [Session(tool="claude", pid=1)],
     )
     first = tick(Config())
     assert stable_sessions_from_keys(first, frozenset()) == []
@@ -860,7 +1319,8 @@ def test_tick_first_tick_returns_nothing(monkeypatch):
 
 def test_tick_two_ticks_confirms(monkeypatch):
     monkeypatch.setattr(
-        "overclocked.detectors.list_all_sessions", lambda: [Session(tool="claude", pid=1)]
+        "overclocked.detectors.list_all_sessions",
+        lambda config=None: [Session(tool="claude", pid=1)],
     )
     k1 = raw_session_keys(tick(Config()))
     sessions = stable_sessions_from_keys(tick(Config()), k1)
@@ -872,7 +1332,7 @@ def test_tick_flicker_not_propagated(monkeypatch):
     """A session appearing in tick 1 but not tick 2 is not emitted after tick 2."""
     call_count = {"n": 0}
 
-    def fake_list():
+    def fake_list(config=None):
         call_count["n"] += 1
         if call_count["n"] == 1:
             return [Session(tool="claude", pid=1)]
@@ -887,7 +1347,7 @@ def test_tick_stable_addition(monkeypatch):
     """Session seen in tick N and N+1 but not N-1 is emitted after tick N+1."""
     call_count = {"n": 0}
 
-    def fake_list():
+    def fake_list(config=None):
         call_count["n"] += 1
         if call_count["n"] >= 2:
             return [Session(tool="codex", pid=77)]
@@ -958,9 +1418,11 @@ def test_codex_cli_status_exec_done(monkeypatch, tmp_path):
         '"payload":{"type":"task_complete"}}\n'
     )
     data = CodexTickData(
-        frozenset({"/Users/me/proj"}),
-        {"/Users/me/proj": rollout},
-        [],
+        cli_active_cwds=frozenset({"/Users/me/proj"}),
+        cli_rollout_by_cwd={"/Users/me/proj": rollout},
+        desktop_rows=[],
+        rollout_id_by_path={},
+        subagent_rows_by_parent={},
     )
     monkeypatch.setattr(d, "_ensure_codex_tick_data", lambda: data)
     monkeypatch.setattr(d, "_cpu_percent", lambda pid: 0.0)
@@ -977,9 +1439,11 @@ def test_codex_cli_status_waiting_stale_transcript(monkeypatch, tmp_path):
         '{"id":"s","cwd":"/Users/me/p"}}\n'
     )
     data = CodexTickData(
-        frozenset({"/Users/me/p"}),
-        {"/Users/me/p": rollout},
-        [],
+        cli_active_cwds=frozenset({"/Users/me/p"}),
+        cli_rollout_by_cwd={"/Users/me/p": rollout},
+        desktop_rows=[],
+        rollout_id_by_path={},
+        subagent_rows_by_parent={},
     )
     monkeypatch.setattr(d, "_ensure_codex_tick_data", lambda: data)
     monkeypatch.setattr(d, "_cpu_percent", lambda pid: 0.0)

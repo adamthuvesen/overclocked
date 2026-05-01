@@ -118,6 +118,38 @@ def _sessions_for_tool_ordered(sessions: list[Session], tool: str) -> list[Sessi
     return rows
 
 
+def _group_parents_with_subagents(
+    sessions: list[Session],
+) -> list[tuple[Session, list[Session]]]:
+    """Pair each parent row with its live subagents, in the input order.
+
+    Subagents whose parent is not in ``sessions`` (orphans) are surfaced as
+    their own top-level entry with an empty children list, so they are never
+    silently dropped.
+    """
+    parents: list[Session] = []
+    children_by_parent: dict[str, list[Session]] = defaultdict(list)
+    orphans: list[Session] = []
+    parent_ids: set[str] = {s.session_id for s in sessions if not s.is_subagent and s.session_id}
+    for s in sessions:
+        if s.is_subagent:
+            psid = s.parent_session_id
+            if psid and psid in parent_ids:
+                children_by_parent[psid].append(s)
+            else:
+                orphans.append(s)
+        else:
+            parents.append(s)
+    out: list[tuple[Session, list[Session]]] = []
+    for p in parents:
+        kids = children_by_parent.get(p.session_id or "", [])
+        kids_sorted = sorted(kids, key=lambda s: s.agent_id or "")
+        out.append((p, kids_sorted))
+    for o in orphans:
+        out.append((o, []))
+    return out
+
+
 def menu_bar_line(active: int) -> str:
     """Return the compact menu bar string."""
     return f"👾  {active}"
@@ -167,12 +199,19 @@ def dropdown(state: RenderState) -> str:
         params = _p(color=_HEADER, size=13, sfimage=symbol)
         lines.append(f"{label}{params}")
 
-        for s in _sessions_for_tool_ordered(sessions, tool):
-            project = _swiftbar_safe(s.project or "—")
-            st = _session_status_suffix(s, session_status=state.config.session_status)
-            mx = _session_metrics_suffix(s, session_metrics=state.config.session_metrics)
+        ordered = _sessions_for_tool_ordered(sessions, tool)
+        for parent, kids in _group_parents_with_subagents(ordered):
+            project = _swiftbar_safe(parent.project or "—")
+            st = _session_status_suffix(parent, session_status=state.config.session_status)
+            mx = _session_metrics_suffix(parent, session_metrics=state.config.session_metrics)
             row_params = _p(color=_ACTIVE, size=12, trim="false")
-            lines.append(f"  {project}{st}{mx}{row_params}")
+            prefix = "  ↳ " if parent.is_subagent else "  "
+            label = "sub agent" if parent.is_subagent else project
+            lines.append(f"{prefix}{label}{st}{mx}{row_params}")
+            for kid in kids:
+                kst = _session_status_suffix(kid, session_status=state.config.session_status)
+                kid_params = _p(color=_ACTIVE, size=12, trim="false")
+                lines.append(f"    ↳ sub agent{kst}{kid_params}")
 
     lines.append("---")
 

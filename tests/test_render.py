@@ -359,6 +359,90 @@ def test_dropdown_newline_in_project_name():
     assert "\n\n" not in output  # no extra blank line from newline in project
 
 
+def test_dropdown_nests_subagents_under_parent():
+    """Subagents render as `↳ sub agent` lines, indented deeper than the parent row."""
+    parent = Session(
+        tool="claude",
+        pid=1,
+        cwd="/dev/catalyst-ai-context",
+        project="catalyst-ai-context",
+        session_id="parent-sid",
+    )
+    kid_a = Session(
+        tool="claude",
+        pid=900_001,
+        cwd="/dev/catalyst-ai-context",
+        project="catalyst-ai-context",
+        synthetic=True,
+        is_subagent=True,
+        parent_session_id="parent-sid",
+        agent_id="aaa1",
+    )
+    kid_b = Session(
+        tool="claude",
+        pid=900_002,
+        cwd="/dev/catalyst-ai-context",
+        project="catalyst-ai-context",
+        synthetic=True,
+        is_subagent=True,
+        parent_session_id="parent-sid",
+        agent_id="bbb2",
+    )
+    output = dropdown(RenderState(sessions=[parent, kid_a, kid_b]))
+    lines = output.splitlines()
+    parent_idx = next(i for i, ln in enumerate(lines) if "  catalyst-ai-context" in ln)
+    sub_lines = [ln for ln in lines if "↳ sub agent" in ln]
+    assert len(sub_lines) == 2
+    assert all(ln.startswith("    ↳ sub agent") for ln in sub_lines)
+    # Children appear after the parent in document order.
+    sub_idxs = [i for i, ln in enumerate(lines) if "↳ sub agent" in ln]
+    assert all(i > parent_idx for i in sub_idxs)
+
+
+def test_dropdown_subagent_status_suffix_when_enabled():
+    parent = Session(
+        tool="claude",
+        pid=1,
+        cwd="/dev/x",
+        project="x",
+        session_id="sid",
+        status="working",
+    )
+    kid = Session(
+        tool="claude",
+        pid=900_001,
+        cwd="/dev/x",
+        project="x",
+        synthetic=True,
+        is_subagent=True,
+        parent_session_id="sid",
+        agent_id="a1",
+        status="working",
+    )
+    output = dropdown(RenderState(sessions=[parent, kid], config=Config(session_status=True)))
+    sub_lines = [ln for ln in output.splitlines() if "↳ sub agent" in ln]
+    assert sub_lines and "· working" in sub_lines[0]
+
+
+def test_dropdown_orphan_subagent_renders_as_top_level():
+    """Subagent without a parent row in the list is shown as its own row, not dropped."""
+    orphan = Session(
+        tool="claude",
+        pid=900_001,
+        cwd="/dev/y",
+        project="y",
+        synthetic=True,
+        is_subagent=True,
+        parent_session_id="missing-parent",
+        agent_id="a1",
+    )
+    output = dropdown(RenderState(sessions=[orphan]))
+    sub_lines = [ln for ln in output.splitlines() if "↳ sub agent" in ln]
+    assert len(sub_lines) == 1
+    # Orphan uses the parent-row indent (2 spaces + arrow), not the deeper child indent.
+    assert sub_lines[0].startswith("  ↳ sub agent")
+
+
 def test_dropdown_pipe_in_witty_line(monkeypatch):
     """Witty line with | must be sanitised."""
     monkeypatch.setattr(

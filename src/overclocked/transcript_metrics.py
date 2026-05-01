@@ -123,6 +123,11 @@ def parse_claude_project_dir(proj: Path) -> UsageSnapshot:
         candidates.append(conv)
     try:
         for p in proj.rglob("agent-*.jsonl"):
+            # Subagent transcripts live at <session>/subagents/agent-*.jsonl and
+            # belong to a Task-tool worker, not the parent's metrics. Excluding
+            # them keeps a stale subagent from dominating the parent's row.
+            if "subagents" in p.parts:
+                continue
             try:
                 if p.is_file():
                     candidates.append(p)

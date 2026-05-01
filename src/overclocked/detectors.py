@@ -38,6 +38,14 @@ class Session:
     cache_create: int | None = None
     #: Desktop / file-backed session jsonl for metrics (Claude desktop, Codex desktop)
     transcript_path: Path | None = None
+    #: Claude Code session UUID; used to link subagents to their parent.
+    session_id: str | None = None
+    #: True when this row represents a Task-tool subagent of another session.
+    is_subagent: bool = False
+    #: Parent ``session_id`` when ``is_subagent`` is True.
+    parent_session_id: str | None = None
+    #: Claude subagent agentId (``agent-<id>.jsonl`` filename body).
+    agent_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -54,6 +62,19 @@ class CodexTickData:
     #: Normalised cwd → rollout jsonl path (newest mtime wins per cwd)
     cli_rollout_by_cwd: dict[str, Path]
     desktop_rows: list[tuple[Path, float, str | None]]
+    #: rollout path → meta.id, populated for every fresh rollout we read.
+    rollout_id_by_path: dict[Path, str]
+    #: parent rollout id → live subagent rows.
+    subagent_rows_by_parent: dict[str, list[CodexSubagentRow]]
+
+
+@dataclass(frozen=True)
+class CodexSubagentRow:
+    child_id: str
+    mtime: float
+    cwd: str | None
+    agent_nickname: str | None
+    transcript_path: Path
 
 
 # Process table for current tick (None → ps axo failed, treat as no processes)
@@ -68,6 +89,10 @@ _ACTIVITY_WINDOW_SEC = 5 * 60
 _CPU_ACTIVITY_THRESHOLD = 5.0
 # abtop-style session status (transcript recency + CPU + tool children)
 _STATUS_RECENCY_SEC = 30
+# Subagents append to their jsonl on every tool turn, so a 30s gap is a
+# strong signal the subagent has finished — drop the row instead of letting
+# it linger for the full 5-min activity window.
+_SUBAGENT_LIVENESS_SEC = _STATUS_RECENCY_SEC
 _STATUS_PARENT_CPU_PCT = 1.0
 _STATUS_DESCENDANT_CPU_PCT = 5.0
 
@@ -474,14 +499,23 @@ def _latest_mtime_under(root: Path) -> float:
 
 
 def _claude_project_dir_for_cwd(cwd: str) -> Path | None:
-    """Resolve ~/.claude/projects/<encoded> for a filesystem cwd, if it exists."""
+    """Resolve ~/.claude/projects/<encoded> for a filesystem cwd, if it exists.
+
+    Claude Code encodes the cwd by replacing ``/``, ``.``, and ``_`` with ``-``
+    (see :func:`_encode_cwd_for_claude_projects`) — so a cwd like
+    ``/Users/me/dev/x/.claude/wt`` lands at ``-Users-me-dev-x--claude-wt``.
+    The simpler ``/``-only encoding is kept as a fallback for paths without
+    ``.``/``_`` to stay forward-compatible with any older layout on disk.
+    """
     if not _CLAUDE_PROJECTS_DIR.exists():
         return None
     tail = cwd.rstrip("/")
     if not tail:
         return None
+    full = _encode_cwd_for_claude_projects(tail)
     slug = tail.lstrip("/").replace("/", "-")
     candidates = (
+        _CLAUDE_PROJECTS_DIR / full,
         _CLAUDE_PROJECTS_DIR / f"-{slug}",
         _CLAUDE_PROJECTS_DIR / slug,
     )
@@ -615,14 +649,32 @@ def _ensure_codex_tick_data() -> CodexTickData:
     now = time.time()
     active_cutoff = now - _ACTIVITY_WINDOW_SEC
     scan_cutoff = now - 86400  # 24h — desktop rows rely on transcript for freshness
+    subagent_cutoff = now - _SUBAGENT_LIVENESS_SEC
     cli_cwds: set[str] = set()
     cli_rollout_by_cwd: dict[str, Path] = {}
     desktop_rows: list[tuple[Path, float, str | None]] = []
+    rollout_id_by_path: dict[Path, str] = {}
+    subagent_rows_by_parent: dict[str, list[CodexSubagentRow]] = {}
     if _CODEX_SESSIONS_DIR.exists():
         for path, mtime in _jsonl_files_with_mtime(_CODEX_SESSIONS_DIR, scan_cutoff):
-            originator, meta_cwd = _codex_session_meta(path)
-            if _is_codex_desktop_originator(originator):
-                desktop_rows.append((path, mtime, meta_cwd))
+            meta = _codex_session_meta(path)
+            if meta.id:
+                rollout_id_by_path[path] = meta.id
+            if meta.parent_thread_id is not None:
+                # Subagent rollout — group under its parent if mtime is fresh.
+                if mtime >= subagent_cutoff and meta.id is not None:
+                    subagent_rows_by_parent.setdefault(meta.parent_thread_id, []).append(
+                        CodexSubagentRow(
+                            child_id=meta.id,
+                            mtime=mtime,
+                            cwd=meta.cwd,
+                            agent_nickname=meta.agent_nickname,
+                            transcript_path=path,
+                        ),
+                    )
+                continue
+            if _is_codex_file_backed_originator(meta.originator):
+                desktop_rows.append((path, mtime, meta.cwd))
             elif mtime >= active_cutoff:
                 if not jsonl_transcript_recent(
                     path,
@@ -630,7 +682,7 @@ def _ensure_codex_tick_data() -> CodexTickData:
                     use_payload_timestamp=True,
                 ):
                     continue
-                nc = _normalise_cwd(meta_cwd)
+                nc = _normalise_cwd(meta.cwd)
                 if nc:
                     cli_cwds.add(nc)
                     prev = cli_rollout_by_cwd.get(nc)
@@ -643,10 +695,14 @@ def _ensure_codex_tick_data() -> CodexTickData:
                         except OSError:
                             cli_rollout_by_cwd[nc] = path
     desktop_rows.sort(key=lambda x: x[1], reverse=True)
+    for rows in subagent_rows_by_parent.values():
+        rows.sort(key=lambda r: r.child_id)  # deterministic order
     _codex_tick_data = CodexTickData(
         cli_active_cwds=frozenset(cli_cwds),
         cli_rollout_by_cwd=cli_rollout_by_cwd,
         desktop_rows=desktop_rows,
+        rollout_id_by_path=rollout_id_by_path,
+        subagent_rows_by_parent=subagent_rows_by_parent,
     )
     return _codex_tick_data
 
@@ -759,15 +815,7 @@ def cursor_agent_session_is_active(project_dir: Path) -> bool:
     if not transcripts_dir.exists():
         return False
     cutoff = time.time() - _ACTIVITY_WINDOW_SEC
-    # Use file mtimes only: the agent-transcripts/ directory mtime often stays stale while
-    # Cursor appends to existing jsonl (many filesystems do not bump the parent on writes).
-    for f in transcripts_dir.rglob("*.jsonl"):
-        try:
-            if f.stat().st_mtime > cutoff:
-                return True
-        except OSError:
-            pass
-    return False
+    return _cursor_active_session_id(transcripts_dir, cutoff) is not None
 
 
 def codex_app_session_is_active(session_file: Path) -> bool:
@@ -788,19 +836,42 @@ def codex_app_session_is_active(session_file: Path) -> bool:
 _CODEX_META_SCAN_BYTES = 65536
 
 
-def _is_codex_desktop_originator(originator: str | None) -> bool:
+_CODEX_FILE_BACKED_ORIGINATORS = frozenset({"codex desktop", "codex-tui", "codex_vscode"})
+
+
+def _is_codex_file_backed_originator(originator: str | None) -> bool:
+    """True for originators whose sessions are detected via the rollout file walk.
+
+    Excludes ``codex_cli_rs`` (detected via pgrep instead), ``codex_exec``
+    (one-shot), ``codex_sdk_ts`` (programmatic), and one-off variants.
+    """
     if not isinstance(originator, str):
         return False
-    return originator.strip().casefold() == "codex desktop"
+    return originator.strip().casefold() in _CODEX_FILE_BACKED_ORIGINATORS
 
 
-def _codex_session_meta(session_file: Path) -> tuple[str | None, str | None]:
-    """Return (originator, cwd) from a session_meta line in the file prefix (not only line 1)."""
+@dataclass(frozen=True)
+class CodexRolloutMeta:
+    originator: str | None
+    cwd: str | None
+    id: str | None
+    parent_thread_id: str | None  # set iff this rollout is a subagent
+    agent_nickname: str | None
+
+
+def _codex_session_meta(session_file: Path) -> CodexRolloutMeta:
+    """Parse a Codex rollout's session_meta record from the file prefix.
+
+    Reads the first ~64 KiB and walks records until a ``session_meta`` is
+    found (it is line 1 in practice, but malformed leading lines are tolerated).
+    On parse failure (torn writes, missing meta line) returns a record with all
+    fields ``None`` — callers must not assume any field is set.
+    """
     try:
         with open(session_file, errors="replace") as f:
             head = f.read(_CODEX_META_SCAN_BYTES)
     except OSError:
-        return None, None
+        return CodexRolloutMeta(None, None, None, None, None)
     for line in head.splitlines():
         line = line.strip()
         if not line:
@@ -809,15 +880,27 @@ def _codex_session_meta(session_file: Path) -> tuple[str | None, str | None]:
             d = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if not isinstance(d, dict):
-            continue
-        if d.get("type") != "session_meta":
+        if not isinstance(d, dict) or d.get("type") != "session_meta":
             continue
         payload = d.get("payload")
         if not isinstance(payload, dict):
             continue
-        return payload.get("originator"), payload.get("cwd")
-    return None, None
+        parent_id = None
+        source = payload.get("source")
+        if isinstance(source, dict):
+            sub = source.get("subagent")
+            if isinstance(sub, dict):
+                ts = sub.get("thread_spawn")
+                if isinstance(ts, dict):
+                    parent_id = ts.get("parent_thread_id")
+        return CodexRolloutMeta(
+            originator=payload.get("originator"),
+            cwd=payload.get("cwd"),
+            id=payload.get("id"),
+            parent_thread_id=parent_id,
+            agent_nickname=payload.get("agent_nickname"),
+        )
+    return CodexRolloutMeta(None, None, None, None, None)
 
 
 def _normalise_cwd(cwd: str | None) -> str | None:
@@ -863,6 +946,71 @@ def _claude_pgrep_all() -> list[int]:
     return _pgrep(_CLAUDE_CLI_COMBINED_PATTERN)
 
 
+def _claude_session_id_from_jsonl_path(path: Path) -> str | None:
+    """Extract a Claude session UUID from ``<sessionId>.jsonl``."""
+    stem = path.stem
+    return stem or None
+
+
+def _list_live_subagents_for_parent(parent: Session) -> list[Session]:
+    """Synthesise rows for live Task-tool subagents of ``parent``.
+
+    Subagent transcripts live at
+    ``~/.claude/projects/<encoded_cwd>/<parentSessionId>/subagents/agent-<agentId>.jsonl``.
+    The directory name carries the parent linkage; the filename carries the
+    agentId. A subagent is considered live iff its jsonl mtime is within
+    ``_ACTIVITY_WINDOW_SEC`` (matching the threshold used to gate the parent).
+    """
+    if parent.cwd is None or parent.session_id is None:
+        return []
+    proj = _claude_project_dir_for_cwd(parent.cwd)
+    if proj is None:
+        return []
+    sub_dir = proj / parent.session_id / "subagents"
+    if not sub_dir.is_dir():
+        return []
+    cutoff = time.time() - _SUBAGENT_LIVENESS_SEC
+    rows: list[tuple[Path, str, float]] = []
+    try:
+        with os.scandir(sub_dir) as it:
+            for entry in it:
+                name = entry.name
+                if not name.startswith("agent-") or not name.endswith(".jsonl"):
+                    continue
+                try:
+                    mtime = entry.stat(follow_symlinks=False).st_mtime
+                except OSError:
+                    continue
+                if mtime < cutoff:
+                    continue
+                agent_id = name[len("agent-") : -len(".jsonl")]
+                if not agent_id:
+                    continue
+                rows.append((Path(entry.path), agent_id, mtime))
+    except OSError:
+        return []
+    rows.sort(key=lambda r: r[1])  # deterministic order by agent_id
+    sessions: list[Session] = []
+    now = time.time()
+    for path, agent_id, mtime in rows:
+        status = "working" if (now - mtime) < _STATUS_RECENCY_SEC else "waiting"
+        sessions.append(
+            Session(
+                tool="claude",
+                pid=_synthetic_pid_str(f"subagent:{agent_id}"),
+                cwd=parent.cwd,
+                project=parent.project,
+                synthetic=True,
+                status=status,
+                transcript_path=path,
+                is_subagent=True,
+                parent_session_id=parent.session_id,
+                agent_id=agent_id,
+            ),
+        )
+    return sessions
+
+
 def list_claude_app_sessions() -> list[Session]:
     """Detect active Claude desktop sessions via recent session files."""
     if not _CLAUDE_PROJECTS_DIR.exists():
@@ -875,6 +1023,12 @@ def list_claude_app_sessions() -> list[Session]:
     )
     sessions: list[Session] = []
     for session_file, _mtime in candidates:
+        # Subagent transcripts live at <project>/<sessionId>/subagents/agent-*.jsonl
+        # and inherit the parent's entrypoint/cwd, so they'd masquerade as their
+        # own top-level desktop session. They're surfaced separately as children
+        # of the parent row by ``_list_live_subagents_for_parent``.
+        if session_file.parent.name == "subagents":
+            continue
         entrypoint, cwd = _claude_session_meta(session_file)
         if entrypoint != "claude-desktop":
             continue
@@ -894,6 +1048,7 @@ def list_claude_app_sessions() -> list[Session]:
                 status=_claude_desktop_session_status(session_file),
                 transcript_path=session_file,
                 synthetic=True,
+                session_id=_claude_session_id_from_jsonl_path(session_file),
             ),
         )
     return sessions
@@ -920,12 +1075,17 @@ def _merge_claude_tty_with_desktop(
         if n is not None and n in desktop_norm:
             continue
         st = _claude_tty_session_status(s.pid, cwd)
-        kept_tty.append(Session(tool="claude", pid=s.pid, cwd=cwd, status=st))
+        sid: str | None = None
+        if cwd is not None:
+            tty_path = _find_claude_transcript_jsonl_for_tty(s.pid, cwd)
+            if tty_path is not None:
+                sid = _claude_session_id_from_jsonl_path(tty_path)
+        kept_tty.append(Session(tool="claude", pid=s.pid, cwd=cwd, status=st, session_id=sid))
     return list(app_sessions) + kept_tty
 
 
-def list_claude_sessions() -> list[Session]:
-    """Detect active Claude Code terminal and desktop sessions."""
+def list_claude_sessions(config: Config | None = None) -> list[Session]:
+    """Detect active Claude Code terminal and desktop sessions (plus live subagents)."""
     tty_sessions: list[Session] = []
     for pid in _claude_pgrep_all():
         if not _has_tty(pid):
@@ -936,7 +1096,13 @@ def list_claude_sessions() -> list[Session]:
             continue
         tty_sessions.append(Session(tool="claude", pid=pid))
 
-    return _merge_claude_tty_with_desktop(tty_sessions, list_claude_app_sessions())
+    parents = _merge_claude_tty_with_desktop(tty_sessions, list_claude_app_sessions())
+    if config is not None and not config.show_subagents:
+        return parents
+    children: list[Session] = []
+    for parent in parents:
+        children.extend(_list_live_subagents_for_parent(parent))
+    return parents + children
 
 
 def _cursor_editor_workspace_is_active(project_dir: Path, cutoff: float) -> bool:
@@ -1009,18 +1175,110 @@ def list_cursor_editor_windows() -> list[Session]:
     return sessions
 
 
-def list_cursor_agent_sessions() -> list[Session]:
+def _cursor_active_session_id(transcripts_dir: Path, cutoff: float) -> str | None:
+    """Return the sessionId dir name of the most-recently-active transcript.
+
+    Cursor stores transcripts at ``agent-transcripts/<sessionId>/<sessionId>.jsonl``
+    (and ``…/subagents/<UUID>.jsonl``). Walks every jsonl under ``transcripts_dir``,
+    keeps the freshest mtime above ``cutoff``, and returns the direct child of
+    ``transcripts_dir`` containing it. Returns ``None`` if no jsonl is fresh.
+    """
+    best_mtime = cutoff
+    best_session_id: str | None = None
+    try:
+        for f in transcripts_dir.rglob("*.jsonl"):
+            try:
+                mtime = f.stat().st_mtime
+            except OSError:
+                continue
+            if mtime <= best_mtime:
+                continue
+            try:
+                rel_parts = f.relative_to(transcripts_dir).parts
+            except ValueError:
+                continue
+            if not rel_parts:
+                continue
+            best_mtime = mtime
+            best_session_id = rel_parts[0]
+    except OSError:
+        return None
+    return best_session_id
+
+
+def _list_live_cursor_subagents_for_parent(parent: Session) -> list[Session]:
+    """Synthesise rows for live Cursor subagents of ``parent``.
+
+    Subagent transcripts live at
+    ``~/.cursor/projects/<encoded_cwd>/agent-transcripts/<sessionId>/subagents/<UUID>.jsonl``.
+    The directory name carries the parent linkage; the bare file stem is the agentId.
+    A subagent is considered live iff its jsonl mtime is within
+    ``_SUBAGENT_LIVENESS_SEC``.
+    """
+    if parent.cwd is None or parent.session_id is None:
+        return []
+    project_dir = _cursor_project_dir_for_cwd(parent.cwd)
+    if project_dir is None:
+        return []
+    sub_dir = project_dir / "agent-transcripts" / parent.session_id / "subagents"
+    if not sub_dir.is_dir():
+        return []
+    cutoff = time.time() - _SUBAGENT_LIVENESS_SEC
+    rows: list[tuple[Path, str, float]] = []
+    try:
+        with os.scandir(sub_dir) as it:
+            for entry in it:
+                name = entry.name
+                if not name.endswith(".jsonl"):
+                    continue
+                try:
+                    mtime = entry.stat(follow_symlinks=False).st_mtime
+                except OSError:
+                    continue
+                if mtime < cutoff:
+                    continue
+                agent_id = name[: -len(".jsonl")]
+                if not agent_id:
+                    continue
+                rows.append((Path(entry.path), agent_id, mtime))
+    except OSError:
+        return []
+    rows.sort(key=lambda r: r[1])  # deterministic order by agent_id
+    sessions: list[Session] = []
+    now = time.time()
+    for path, agent_id, mtime in rows:
+        status = "working" if (now - mtime) < _STATUS_RECENCY_SEC else "waiting"
+        sessions.append(
+            Session(
+                tool="cursor_agent",
+                pid=_synthetic_pid_str(f"cursor-subagent:{agent_id}"),
+                cwd=parent.cwd,
+                project=parent.project,
+                synthetic=True,
+                status=status,
+                transcript_path=path,
+                is_subagent=True,
+                parent_session_id=parent.session_id,
+                agent_id=agent_id,
+            ),
+        )
+    return sessions
+
+
+def list_cursor_agent_sessions(config: Config | None = None) -> list[Session]:
     """Detect active Cursor background agent sessions via transcript mtimes."""
     if not _CURSOR_PROJECTS_DIR.exists():
         return []
-    sessions = []
+    sessions: list[Session] = []
+    activity_cutoff = time.time() - _ACTIVITY_WINDOW_SEC
     for project_dir in _CURSOR_PROJECTS_DIR.iterdir():
         if not project_dir.is_dir():
             continue
         transcripts_dir = project_dir / "agent-transcripts"
         if not transcripts_dir.exists():
             continue
-        if not cursor_agent_session_is_active(project_dir):
+        session_id = _cursor_active_session_id(transcripts_dir, activity_cutoff)
+        if session_id is None:
             continue
         cwd = _cursor_project_workspace_cwd(project_dir)
         if cwd is None:
@@ -1033,8 +1291,28 @@ def list_cursor_agent_sessions() -> list[Session]:
                 cwd=cwd,
                 status=_cursor_coarse_status(project_dir),
                 synthetic=True,
+                session_id=session_id,
             ),
         )
+
+    if config is not None and not config.show_subagents:
+        return sessions
+    children: list[Session] = []
+    for parent in sessions:
+        children.extend(_list_live_cursor_subagents_for_parent(parent))
+    return sessions + children
+
+
+def list_cursor_agent_cli_sessions() -> list[Session]:
+    """Detect interactive ``cursor-agent`` CLI sessions via pgrep + TTY."""
+    sessions: list[Session] = []
+    for pid in _pgrep(r"cursor-agent( |$)"):
+        if not _has_tty(pid):
+            continue
+        if is_descendant_of(pid, ["ralph", "cron"]):
+            continue
+        cwd = _resolve_cwd_cached(pid)
+        sessions.append(Session(tool="cursor_agent", pid=pid, cwd=cwd))
     return sessions
 
 
@@ -1042,9 +1320,17 @@ def _merge_cursor_editor_and_agent(
     editor: list[Session],
     agent: list[Session],
 ) -> list[Session]:
-    """At most one Cursor session per workspace; prefer cursor_agent when both qualify."""
+    """At most one Cursor parent per workspace; prefer cursor_agent when both qualify.
+
+    Subagent rows (``is_subagent=True``) share their parent's cwd, so they bypass
+    the cwd-dedupe and pass through unchanged.
+    """
     by_norm: dict[str, Session] = {}
+    subagents: list[Session] = []
     for s in agent:
+        if s.is_subagent:
+            subagents.append(s)
+            continue
         n = _normalise_cwd(s.cwd)
         if n is not None:
             by_norm[n] = s
@@ -1053,12 +1339,52 @@ def _merge_cursor_editor_and_agent(
         if n is None or n in by_norm:
             continue
         by_norm[n] = s
-    return list(by_norm.values())
+    return list(by_norm.values()) + subagents
 
 
-def list_codex_sessions() -> list[Session]:
+def _list_live_codex_subagents_for_parents(parents: list[Session]) -> list[Session]:
+    """Synthesise rows for live Codex subagents whose parent_thread_id matches one of ``parents``.
+
+    Uses the tick-cached ``CodexTickData.subagent_rows_by_parent`` index — populated
+    once per tick by ``_ensure_codex_tick_data``. A child rollout is "live" if its
+    mtime is within ``_SUBAGENT_LIVENESS_SEC`` (already filtered during indexing).
+    """
+    if not _CODEX_SESSIONS_DIR.exists():
+        return []
+    data = _ensure_codex_tick_data()
+    if not data.subagent_rows_by_parent:
+        return []
+    out: list[Session] = []
+    now = time.time()
+    for parent in parents:
+        if parent.session_id is None:
+            continue
+        rows = data.subagent_rows_by_parent.get(parent.session_id)
+        if not rows:
+            continue
+        for row in rows:
+            status = "working" if (now - row.mtime) < _STATUS_RECENCY_SEC else "waiting"
+            out.append(
+                Session(
+                    tool="codex",
+                    pid=_synthetic_pid_str(f"codex-subagent:{row.child_id}"),
+                    cwd=row.cwd or parent.cwd,
+                    project=parent.project,
+                    synthetic=True,
+                    status=status,
+                    transcript_path=row.transcript_path,
+                    is_subagent=True,
+                    parent_session_id=parent.session_id,
+                    agent_id=row.child_id,
+                ),
+            )
+    return out
+
+
+def list_codex_sessions(config: Config | None = None) -> list[Session]:
     """Detect interactive Codex CLI sessions, excluding daemon."""
-    sessions = []
+    parents: list[Session] = []
+    data = _ensure_codex_tick_data() if _CODEX_SESSIONS_DIR.exists() else None
     for pid in _pgrep(r"codex( |$)"):
         argv = _argv(pid)
         if "codex-companion" in argv:
@@ -1073,23 +1399,34 @@ def list_codex_sessions() -> list[Session]:
         if not codex_cli_session_is_active(pid):
             continue
         cwd = _resolve_cwd_cached(pid)
-        sessions.append(
+        session_id: str | None = None
+        if data is not None:
+            nc = _normalise_cwd(cwd)
+            if nc is not None:
+                rollout = data.cli_rollout_by_cwd.get(nc)
+                if rollout is not None:
+                    session_id = data.rollout_id_by_path.get(rollout)
+        parents.append(
             Session(
                 tool="codex",
                 pid=pid,
                 cwd=cwd,
                 status=_codex_cli_session_status(pid, cwd, argv),
+                session_id=session_id,
             ),
         )
-    return _dedupe_codex_cli_sessions(sessions)
+    parents = _dedupe_codex_cli_sessions(parents)
+    if config is not None and not config.show_subagents:
+        return parents
+    return parents + _list_live_codex_subagents_for_parents(parents)
 
 
-def list_codex_app_sessions() -> list[Session]:
-    """Detect active Codex Desktop app sessions via recent session files."""
+def list_codex_app_sessions(config: Config | None = None) -> list[Session]:
+    """Detect active file-backed Codex sessions (Desktop, TUI, IDE-embedded)."""
     if not _CODEX_SESSIONS_DIR.exists():
         return []
     data = _ensure_codex_tick_data()
-    sessions = []
+    parents: list[Session] = []
     seen_keys: set[str] = set()
     for path, _mtime, cwd in data.desktop_rows:
         norm_cwd = _normalise_cwd(cwd)
@@ -1101,7 +1438,7 @@ def list_codex_app_sessions() -> list[Session]:
             continue
         pid = _synthetic_pid(path)
         st = _codex_app_file_session_status(path)
-        sessions.append(
+        parents.append(
             Session(
                 tool="codex",
                 pid=pid,
@@ -1109,9 +1446,12 @@ def list_codex_app_sessions() -> list[Session]:
                 status=st,
                 transcript_path=path,
                 synthetic=True,
+                session_id=data.rollout_id_by_path.get(path),
             ),
         )
-    return sessions
+    if config is not None and not config.show_subagents:
+        return parents
+    return parents + _list_live_codex_subagents_for_parents(parents)
 
 
 def _clear_session_metrics(s: Session) -> None:
@@ -1128,6 +1468,10 @@ def _enrich_session_metrics(sessions: list[Session], config: Config) -> None:
     data = _ensure_codex_tick_data()
     for s in sessions:
         if s.tool in ("cursor_editor", "cursor_agent"):
+            continue
+        if s.is_subagent:
+            # Subagent token usage rolls up to the parent transcript; surfacing
+            # per-subagent metrics is a separate, harder change. Skip for now.
             continue
         if config.is_redacted(s.cwd) or s.project == "redacted":
             _clear_session_metrics(s)
@@ -1161,15 +1505,15 @@ def _enrich_session_metrics(sessions: list[Session], config: Config) -> None:
         s.cache_create = snap.cache_create
 
 
-def list_all_sessions() -> list[Session]:
+def list_all_sessions(config: Config | None = None) -> list[Session]:
     """Return all detected active sessions."""
     cursor_ed = list_cursor_editor_windows()
-    cursor_ag = list_cursor_agent_sessions()
+    cursor_ag = list_cursor_agent_sessions(config) + list_cursor_agent_cli_sessions()
     return (
-        list_claude_sessions()
+        list_claude_sessions(config)
         + _merge_cursor_editor_and_agent(cursor_ed, cursor_ag)
-        + list_codex_sessions()
-        + list_codex_app_sessions()
+        + list_codex_sessions(config)
+        + list_codex_app_sessions(config)
     )
 
 
@@ -1180,7 +1524,7 @@ def raw_session_keys(sessions: list[Session]) -> frozenset[tuple[str, int]]:
 def tick(config: Config) -> list[Session]:
     """Sample current sessions from the OS and return the enriched raw list."""
     _begin_tick()
-    raw = list_all_sessions()
+    raw = list_all_sessions(config)
     # Synthetic session PIDs are fake; skip lsof batch for them.
     pids_needing = sorted({s.pid for s in raw if s.cwd is None and not s.synthetic})
     if pids_needing:
