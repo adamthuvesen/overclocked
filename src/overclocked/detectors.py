@@ -56,7 +56,7 @@ class CodexTickData:
     desktop_rows: list[tuple[Path, float, str | None]]
 
 
-# Process table for current tick (None → fall back to per-pid ps)
+# Process table for current tick (None → ps axo failed, treat as no processes)
 _ps_table: dict[int, PsRow] | None = None
 _codex_tick_data: CodexTickData | None = None
 
@@ -538,7 +538,7 @@ def _find_claude_session_file_for_pid(sessions_dir: Path, pid: int) -> Path | No
     return None
 
 
-def _claude_session_meta_from_session_file(path: Path) -> tuple[str | None, str | None]:
+def _claude_session_meta_from_disk(path: Path) -> tuple[str | None, str | None]:
     """Return ``(session_id, cwd)`` from a Claude Code ``sessions/*.json`` file."""
     try:
         data: object = json.loads(path.read_text(encoding="utf-8"))
@@ -562,7 +562,7 @@ def _find_claude_transcript_jsonl_for_tty(pid: int, cwd: str) -> Path | None:
     session_json = _find_claude_session_file_for_pid(sessions_dir, pid)
     if session_json is None:
         return None
-    session_id, file_cwd = _claude_session_meta_from_session_file(session_json)
+    session_id, file_cwd = _claude_session_meta_from_disk(session_json)
     if not session_id:
         return None
     if file_cwd is not None:

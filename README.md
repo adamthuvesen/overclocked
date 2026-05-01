@@ -68,6 +68,8 @@ redact_paths = ["~/clients/", "~/personal/"]
 [display]
 # Show Claude/Codex model and context-token totals. Default: false.
 session_metrics = false
+# Show per-session activity status (working/waiting/done) in the dropdown. Default: false.
+session_status = false
 ```
 
 No network calls, telemetry, or remote storage. Everything overclocked writes stays
@@ -92,7 +94,6 @@ overclocked --prune                 # prune and downsample old history
 The history database stores:
 
 - `snapshots`: timestamped active counts and per-tool counts.
-- `sessions`: opened/closed session records with tool, project, pid, and session key.
 
 Pruning deletes snapshots older than one year and downsamples snapshots older than
 90 days to one row per minute using the median active count.
@@ -115,7 +116,7 @@ The code is organized around a few small modules:
 
 - `src/overclocked/detectors.py`: process/transcript detection and session enrichment.
 - `src/overclocked/render.py`: SwiftBar menu rendering.
-- `src/overclocked/storage.py`: SQLite migrations, snapshots, sessions, and pruning.
+- `src/overclocked/storage.py`: SQLite migrations, snapshots, and pruning.
 - `src/overclocked/aggregates.py`: today's peak/average/sparkline queries.
 - `src/overclocked/config.py`: TOML config and path redaction.
 - `scripts/overclocked.py`: SwiftBar streamable plugin wrapper.
