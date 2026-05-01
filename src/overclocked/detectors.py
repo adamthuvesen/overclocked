@@ -673,7 +673,7 @@ def _ensure_codex_tick_data() -> CodexTickData:
                         ),
                     )
                 continue
-            if _is_codex_desktop_originator(meta.originator):
+            if _is_codex_file_backed_originator(meta.originator):
                 desktop_rows.append((path, mtime, meta.cwd))
             elif mtime >= active_cutoff:
                 if not jsonl_transcript_recent(
@@ -836,10 +836,18 @@ def codex_app_session_is_active(session_file: Path) -> bool:
 _CODEX_META_SCAN_BYTES = 65536
 
 
-def _is_codex_desktop_originator(originator: str | None) -> bool:
+_CODEX_FILE_BACKED_ORIGINATORS = frozenset({"codex desktop", "codex-tui", "codex_vscode"})
+
+
+def _is_codex_file_backed_originator(originator: str | None) -> bool:
+    """True for originators whose sessions are detected via the rollout file walk.
+
+    Excludes ``codex_cli_rs`` (detected via pgrep instead), ``codex_exec``
+    (one-shot), ``codex_sdk_ts`` (programmatic), and one-off variants.
+    """
     if not isinstance(originator, str):
         return False
-    return originator.strip().casefold() == "codex desktop"
+    return originator.strip().casefold() in _CODEX_FILE_BACKED_ORIGINATORS
 
 
 @dataclass(frozen=True)
@@ -1295,6 +1303,19 @@ def list_cursor_agent_sessions(config: Config | None = None) -> list[Session]:
     return sessions + children
 
 
+def list_cursor_agent_cli_sessions() -> list[Session]:
+    """Detect interactive ``cursor-agent`` CLI sessions via pgrep + TTY."""
+    sessions: list[Session] = []
+    for pid in _pgrep(r"cursor-agent( |$)"):
+        if not _has_tty(pid):
+            continue
+        if is_descendant_of(pid, ["ralph", "cron"]):
+            continue
+        cwd = _resolve_cwd_cached(pid)
+        sessions.append(Session(tool="cursor_agent", pid=pid, cwd=cwd))
+    return sessions
+
+
 def _merge_cursor_editor_and_agent(
     editor: list[Session],
     agent: list[Session],
@@ -1401,7 +1422,7 @@ def list_codex_sessions(config: Config | None = None) -> list[Session]:
 
 
 def list_codex_app_sessions(config: Config | None = None) -> list[Session]:
-    """Detect active Codex Desktop app sessions via recent session files."""
+    """Detect active file-backed Codex sessions (Desktop, TUI, IDE-embedded)."""
     if not _CODEX_SESSIONS_DIR.exists():
         return []
     data = _ensure_codex_tick_data()
@@ -1487,7 +1508,7 @@ def _enrich_session_metrics(sessions: list[Session], config: Config) -> None:
 def list_all_sessions(config: Config | None = None) -> list[Session]:
     """Return all detected active sessions."""
     cursor_ed = list_cursor_editor_windows()
-    cursor_ag = list_cursor_agent_sessions(config)
+    cursor_ag = list_cursor_agent_sessions(config) + list_cursor_agent_cli_sessions()
     return (
         list_claude_sessions(config)
         + _merge_cursor_editor_and_agent(cursor_ed, cursor_ag)

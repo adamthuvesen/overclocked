@@ -26,6 +26,7 @@ from overclocked.detectors import (
     list_claude_sessions,
     list_codex_app_sessions,
     list_codex_sessions,
+    list_cursor_agent_cli_sessions,
     list_cursor_agent_sessions,
     list_cursor_editor_windows,
     raw_session_keys,
@@ -344,6 +345,38 @@ def test_list_cursor_agent_sessions_show_subagents_false_omits_children(tmp_path
     assert all(not s.is_subagent for s in sessions)
 
 
+# ── list_cursor_agent_cli_sessions ───────────────────────────────────────────
+
+
+def test_list_cursor_agent_cli_sessions_detects_running_process(monkeypatch):
+    monkeypatch.setattr("overclocked.detectors._pgrep", lambda p: [4242])
+    monkeypatch.setattr("overclocked.detectors._has_tty", lambda pid: True)
+    monkeypatch.setattr("overclocked.detectors.is_descendant_of", lambda pid, names: False)
+    monkeypatch.setattr("overclocked.detectors._resolve_cwd_cached", lambda pid: "/Users/me/proj")
+    sessions = list_cursor_agent_cli_sessions()
+    assert len(sessions) == 1
+    assert sessions[0].pid == 4242
+    assert sessions[0].tool == "cursor_agent"
+    assert sessions[0].cwd == "/Users/me/proj"
+    assert sessions[0].session_id is None  # CLI variant has no transcript-derived id
+
+
+def test_list_cursor_agent_cli_sessions_skips_no_tty(monkeypatch):
+    monkeypatch.setattr("overclocked.detectors._pgrep", lambda p: [4242])
+    monkeypatch.setattr("overclocked.detectors._has_tty", lambda pid: False)
+    monkeypatch.setattr("overclocked.detectors.is_descendant_of", lambda pid, names: False)
+    monkeypatch.setattr("overclocked.detectors._resolve_cwd_cached", lambda pid: "/Users/me/proj")
+    assert list_cursor_agent_cli_sessions() == []
+
+
+def test_cursor_agent_cli_dedupes_with_ide_agent_same_cwd():
+    """A CLI cursor_agent and an IDE cursor_agent in the same cwd collapse to one row."""
+    cli = Session(tool="cursor_agent", pid=4242, cwd="/Users/me/proj")
+    ide = Session(tool="cursor_agent", pid=99, cwd="/Users/me/proj", synthetic=True)
+    merged = _merge_cursor_editor_and_agent(editor=[], agent=[ide, cli])
+    assert len(merged) == 1
+
+
 # ── list_cursor_editor_windows ────────────────────────────────────────────────
 
 
@@ -546,9 +579,30 @@ def test_codex_session_meta_found_after_non_meta_preamble(tmp_path, monkeypatch)
     assert sessions[0].cwd == "/Users/me/proj"
 
 
-def test_list_codex_app_sessions_skips_tui(tmp_path, monkeypatch):
+def test_list_codex_app_sessions_includes_tui(tmp_path, monkeypatch):
+    """codex-tui is a file-backed surface — emit one row from the rollout walk."""
     f = tmp_path / "session-tui.jsonl"
     _make_codex_session(f, "/Users/me/proj", originator="codex-tui")
+    monkeypatch.setattr("overclocked.detectors._CODEX_SESSIONS_DIR", tmp_path)
+    sessions = list_codex_app_sessions()
+    assert len(sessions) == 1
+    assert sessions[0].cwd == "/Users/me/proj"
+
+
+def test_list_codex_app_sessions_includes_vscode(tmp_path, monkeypatch):
+    """codex_vscode (IDE-embedded) is also file-backed — emit one row."""
+    f = tmp_path / "session-vscode.jsonl"
+    _make_codex_session(f, "/Users/me/proj", originator="codex_vscode")
+    monkeypatch.setattr("overclocked.detectors._CODEX_SESSIONS_DIR", tmp_path)
+    sessions = list_codex_app_sessions()
+    assert len(sessions) == 1
+    assert sessions[0].cwd == "/Users/me/proj"
+
+
+def test_list_codex_app_sessions_skips_codex_exec(tmp_path, monkeypatch):
+    """codex_exec one-shots stay outside the file-backed parent set."""
+    f = tmp_path / "session-exec.jsonl"
+    _make_codex_session(f, "/Users/me/proj", originator="codex_exec")
     monkeypatch.setattr("overclocked.detectors._CODEX_SESSIONS_DIR", tmp_path)
     sessions = list_codex_app_sessions()
     assert sessions == []
@@ -1161,7 +1215,7 @@ def test_list_codex_cli_drops_stale_session_file(tmp_path, monkeypatch):
 
 def test_list_codex_cli_keeps_recent_session_file(tmp_path, monkeypatch):
     f = tmp_path / "cli.jsonl"
-    _make_codex_session(f, "/Users/me/proj", originator="codex-tui")
+    _make_codex_session(f, "/Users/me/proj", originator="codex_cli_rs")
 
     monkeypatch.setattr("overclocked.detectors._pgrep", lambda p: [9005])
     monkeypatch.setattr("overclocked.detectors._argv", lambda pid: "codex run")
