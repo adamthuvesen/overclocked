@@ -110,6 +110,63 @@ def test_parse_claude_project_dir_prefers_newest_transcript_file(tmp_path: Path)
     assert snap.input_tokens == 12
 
 
+def test_parse_claude_project_dir_includes_direct_session_jsonl(tmp_path: Path) -> None:
+    proj = tmp_path / "p"
+    proj.mkdir()
+    direct = proj / "session-123.jsonl"
+    _write_jsonl(
+        direct,
+        [
+            {
+                "type": "assistant",
+                "message": {
+                    "model": "direct",
+                    "usage": {"input_tokens": 42, "output_tokens": 0},
+                },
+            },
+        ],
+    )
+    snap = parse_claude_project_dir(proj)
+    assert snap.model == "direct"
+    assert snap.input_tokens == 42
+
+
+def test_parse_claude_project_dir_excludes_subagent_transcripts(tmp_path: Path) -> None:
+    proj = tmp_path / "p"
+    subagents = proj / "parent-session" / "subagents"
+    subagents.mkdir(parents=True)
+    parent = proj / "conversation.jsonl"
+    child = subagents / "agent-child.jsonl"
+    _write_jsonl(
+        parent,
+        [
+            {
+                "type": "assistant",
+                "message": {
+                    "model": "parent",
+                    "usage": {"input_tokens": 7, "output_tokens": 0},
+                },
+            },
+        ],
+    )
+    _write_jsonl(
+        child,
+        [
+            {
+                "type": "assistant",
+                "message": {
+                    "model": "child",
+                    "usage": {"input_tokens": 999, "output_tokens": 0},
+                },
+            },
+        ],
+    )
+    os.utime(child, (time.time() + 10, time.time() + 10))
+    snap = parse_claude_project_dir(proj)
+    assert snap.model == "parent"
+    assert snap.input_tokens == 7
+
+
 def test_parse_codex_rollout_tail_turn_context_and_token_count(tmp_path: Path) -> None:
     p = tmp_path / "rollout.jsonl"
     _write_jsonl(
