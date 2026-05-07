@@ -52,6 +52,38 @@ def test_redact_paths_list_of_ints_returns_defaults(tmp_path, monkeypatch, capsy
     assert "warning" in captured.err.lower()
 
 
+def test_privacy_section_wrong_type_warns_and_uses_privacy_defaults(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    monkeypatch.setenv("OVERCLOCKED_HOME", str(tmp_path))
+    (tmp_path / "config.toml").write_text(
+        'privacy = "bad"\n[display]\nsession_status = true\n',
+    )
+    cfg = load_config()
+    assert cfg.redact_paths == ["~/clients/"]
+    assert cfg.session_status is True
+    err = capsys.readouterr().err
+    assert "privacy" in err
+    assert "warning" in err.lower()
+
+
+def test_display_section_wrong_type_warns_and_uses_display_defaults(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("OVERCLOCKED_HOME", str(tmp_path))
+    (tmp_path / "config.toml").write_text(
+        'display = []\n[privacy]\nredact_paths = ["~/work/"]\n',
+    )
+    cfg = load_config()
+    assert cfg.redact_paths == ["~/work/"]
+    assert cfg.session_status is False
+    assert cfg.session_metrics is False
+    assert cfg.show_subagents is True
+    err = capsys.readouterr().err
+    assert "display" in err
+    assert "warning" in err.lower()
+
+
 def test_is_redacted_matching_prefix(tmp_path):
     home = Path.home()
     cfg = Config(redact_paths=["~/clients/"])

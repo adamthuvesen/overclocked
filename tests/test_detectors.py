@@ -59,6 +59,33 @@ def test_descendant_is_ralph(monkeypatch):
     assert is_descendant_of(200, ["ralph"])
 
 
+def test_descendant_ignores_name_in_arguments_or_paths(monkeypatch):
+    import overclocked.detectors as d
+
+    table = {
+        100: d.PsRow(
+            ppid=1,
+            tty="??",
+            pcpu=0.0,
+            command="/usr/bin/python /Users/me/dev/ralph-helper/run.py",
+        ),
+        200: d.PsRow(ppid=100, tty="??", pcpu=0.0, command="/usr/bin/claude /tmp/cron-notes"),
+    }
+    monkeypatch.setattr(d, "_ps_table", table)
+    assert not is_descendant_of(200, ["ralph", "cron"])
+
+
+def test_descendant_matches_executable_basename(monkeypatch):
+    import overclocked.detectors as d
+
+    table = {
+        100: d.PsRow(ppid=1, tty="??", pcpu=0.0, command="/opt/homebrew/bin/cron run"),
+        200: d.PsRow(ppid=100, tty="??", pcpu=0.0, command="/usr/bin/codex"),
+    }
+    monkeypatch.setattr(d, "_ps_table", table)
+    assert is_descendant_of(200, ["cron"])
+
+
 # ── claude_cli_session_is_active ──────────────────────────────────────────────
 
 
@@ -71,6 +98,19 @@ def test_claude_active_recent_file(tmp_path, monkeypatch):
     monkeypatch.setattr(d, "_CLAUDE_PROJECTS_DIR", projects.parent)
     monkeypatch.setattr(d, "_resolve_cwd_cached", lambda pid: "/myproject")
     assert claude_cli_session_is_active(12345)
+
+
+def test_claude_status_uses_direct_session_jsonl(tmp_path):
+    import overclocked.detectors as d
+
+    proj = tmp_path / "project"
+    proj.mkdir()
+    direct = proj / "session-123.jsonl"
+    direct.write_text(json.dumps({"timestamp": _iso_now_z(), "type": "user"}) + "\n")
+
+    last = d._claude_project_dir_max_transcript_unix(proj)
+    assert last is not None
+    assert time.time() - last < 10
 
 
 def test_claude_inactive_old_file(tmp_path, monkeypatch):
@@ -359,6 +399,44 @@ def test_list_cursor_agent_sessions_show_subagents_false_omits_children(tmp_path
     monkeypatch.setattr("overclocked.detectors._CURSOR_PROJECTS_DIR", tmp_path)
     sessions = list_cursor_agent_sessions(Config(show_subagents=False))
     assert all(not s.is_subagent for s in sessions)
+
+
+def test_cursor_agent_ignores_touched_stale_transcript(tmp_path, monkeypatch):
+    import os
+
+    sid = "stale-session"
+    proj = _make_cursor_workspace(
+        tmp_path,
+        project_slug="Users-me-dev-proj",
+        cwd="/Users/me/dev/proj",
+        session_id=sid,
+    )
+    transcript = proj / "agent-transcripts" / sid / f"{sid}.jsonl"
+    transcript.write_text(
+        json.dumps({"timestamp": "2020-01-01T00:00:00Z", "type": "user"}) + "\n",
+    )
+    now = time.time()
+    os.utime(transcript, (now, now))
+
+    monkeypatch.setattr("overclocked.detectors._CURSOR_PROJECTS_DIR", tmp_path)
+    assert list_cursor_agent_sessions(Config()) == []
+
+
+def test_cursor_agent_accepts_fresh_embedded_timestamp(tmp_path, monkeypatch):
+    sid = "fresh-session"
+    _make_cursor_workspace(
+        tmp_path,
+        project_slug="Users-me-dev-proj",
+        cwd="/Users/me/dev/proj",
+        session_id=sid,
+    )
+    transcript = tmp_path / "Users-me-dev-proj" / "agent-transcripts" / sid / f"{sid}.jsonl"
+    transcript.write_text(json.dumps({"timestamp": _iso_now_z(), "type": "user"}) + "\n")
+
+    monkeypatch.setattr("overclocked.detectors._CURSOR_PROJECTS_DIR", tmp_path)
+    sessions = list_cursor_agent_sessions(Config(show_subagents=False))
+    assert len(sessions) == 1
+    assert sessions[0].session_id == sid
 
 
 # ── list_cursor_agent_cli_sessions ───────────────────────────────────────────
@@ -830,6 +908,39 @@ def test_list_codex_app_sessions_ignores_forked_from_id(tmp_path, monkeypatch):
     assert len(sessions) == 1
     assert sessions[0].session_id == "forked-001"
     assert sessions[0].is_subagent is False
+
+
+def test_jsonl_files_with_mtime_respects_result_cap(tmp_path):
+    import overclocked.detectors as d
+
+    for i in range(5):
+        p = tmp_path / f"{i}.jsonl"
+        p.write_text("{}")
+    rows = d._jsonl_files_with_mtime(tmp_path, time.time() - 60, max_files=3)
+    assert len(rows) == 3
+    assert all(path.suffix == ".jsonl" for path, _mtime in rows)
+
+
+def test_jsonl_files_with_mtime_large_stale_tree_still_finds_fresh(tmp_path):
+    import os
+
+    import overclocked.detectors as d
+
+    old = time.time() - 10_000
+    for i in range(20):
+        stale_dir = tmp_path / f"stale-{i:02d}"
+        stale_dir.mkdir()
+        stale = stale_dir / "old.jsonl"
+        stale.write_text("{}")
+        os.utime(stale, (old, old))
+        os.utime(stale_dir, (old, old))
+    fresh_dir = tmp_path / "fresh"
+    fresh_dir.mkdir()
+    fresh = fresh_dir / "new.jsonl"
+    fresh.write_text("{}")
+
+    rows = d._jsonl_files_with_mtime(tmp_path, time.time() - 60, max_files=5, max_dirs=5)
+    assert [path for path, _mtime in rows] == [fresh]
 
 
 def test_codex_classifier_handles_torn_first_line(tmp_path, monkeypatch):

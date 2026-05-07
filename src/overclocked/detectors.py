@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import time
 from dataclasses import dataclass
 from functools import lru_cache
@@ -14,6 +15,7 @@ from overclocked._subprocess import _safe_check_output
 from overclocked.config import Config
 from overclocked.identity import project_label, resolve_cwd, resolve_cwds_batch
 from overclocked.transcript_metrics import (
+    claude_project_transcript_candidates,
     parse_claude_jsonl_tail,
     parse_claude_project_dir,
     parse_codex_rollout_tail,
@@ -95,9 +97,22 @@ _STATUS_RECENCY_SEC = 30
 _SUBAGENT_LIVENESS_SEC = _STATUS_RECENCY_SEC
 _STATUS_PARENT_CPU_PCT = 1.0
 _STATUS_DESCENDANT_CPU_PCT = 5.0
+_JSONL_SCAN_MAX_FILES = 2048
+_JSONL_SCAN_MAX_DIRS = 1024
+_CURSOR_TRANSCRIPT_SCAN_MAX_FILES = 1024
 
 _cwd_cache: dict[int, str | None] = {}
 _mtime_cache: dict[str, float] = {}
+
+
+def _process_basename(command: str) -> str:
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        parts = command.split()
+    if not parts:
+        return ""
+    return Path(parts[0]).name.rstrip(":").casefold()
 
 
 def _begin_tick() -> None:
@@ -176,6 +191,7 @@ def is_descendant_of(pid: int, names: list[str]) -> bool:
     """Return True if any ancestor process has a name matching names."""
     if not _ps_table:
         return False
+    needles = {name.casefold() for name in names}
     visited: set[int] = set()
     current = pid
     while current and current not in visited:
@@ -183,7 +199,7 @@ def is_descendant_of(pid: int, names: list[str]) -> bool:
         row = _ps_table.get(current)
         if row is None:
             break
-        if any(name.lower() in row.command.lower() for name in names):
+        if _process_basename(row.command) in needles:
             return True
         parent = row.ppid
         if parent <= 1 or parent == current:
@@ -241,20 +257,7 @@ def _working_or_waiting_from_signals(
 def _claude_project_dir_max_transcript_unix(proj: Path) -> float | None:
     """Latest JSONL transcript timestamp under a Claude Code project dir."""
     max_u: float | None = None
-    candidates: list[Path] = []
-    conv = proj / "conversation.jsonl"
-    try:
-        if conv.is_file():
-            candidates.append(conv)
-        for p in proj.rglob("agent-*.jsonl"):
-            try:
-                if p.is_file():
-                    candidates.append(p)
-            except OSError:
-                pass
-    except OSError:
-        pass
-    for p in candidates[:64]:
+    for p in claude_project_transcript_candidates(proj):
         r = jsonl_tail_timestamp_result(p, use_payload_timestamp=False)
         if r.max_unix is not None and (max_u is None or r.max_unix > max_u):
             max_u = r.max_unix
@@ -641,23 +644,70 @@ def _resolve_cwd_cached(pid: int) -> str | None:
     return _cwd_cache[pid]
 
 
-def _jsonl_files_with_mtime(root: Path, cutoff: float) -> list[tuple[Path, float]]:
+def _jsonl_files_with_mtime(
+    root: Path,
+    cutoff: float,
+    *,
+    max_files: int = _JSONL_SCAN_MAX_FILES,
+    max_dirs: int = _JSONL_SCAN_MAX_DIRS,
+) -> list[tuple[Path, float]]:
     """Recursively collect (path, mtime) for .jsonl files with mtime >= cutoff."""
     result: list[tuple[Path, float]] = []
-    try:
-        for entry in os.scandir(root):
-            if entry.is_dir(follow_symlinks=False):
-                result.extend(_jsonl_files_with_mtime(Path(entry.path), cutoff))
-            elif entry.name.endswith(".jsonl"):
-                try:
-                    mtime = entry.stat().st_mtime
-                    if mtime >= cutoff:
-                        result.append((Path(entry.path), mtime))
-                except OSError:
-                    pass
-    except OSError:
-        pass
+    stack = [root]
+    seen_dirs = 0
+    seen_files = 0
+    while stack and seen_dirs < max_dirs and seen_files < max_files:
+        current = stack.pop()
+        seen_dirs += 1
+        entries = []
+        try:
+            with os.scandir(current) as it:
+                entries = list(it)
+        except OSError:
+            continue
+
+        def entry_mtime(entry: os.DirEntry) -> float:
+            try:
+                return entry.stat(follow_symlinks=False).st_mtime
+            except OSError:
+                return 0.0
+
+        entries_by_mtime = sorted(entries, key=entry_mtime, reverse=True)
+        for entry in entries_by_mtime:
+            try:
+                is_dir = entry.is_dir(follow_symlinks=False)
+            except OSError:
+                continue
+            if is_dir:
+                continue
+            if not entry.name.endswith(".jsonl"):
+                continue
+            seen_files += 1
+            if seen_files > max_files:
+                break
+            try:
+                mtime = entry.stat(follow_symlinks=False).st_mtime
+            except OSError:
+                continue
+            if mtime >= cutoff:
+                result.append((Path(entry.path), mtime))
+        for entry in reversed(entries_by_mtime):
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(Path(entry.path))
+            except OSError:
+                continue
+    result.sort(key=lambda item: (-item[1], str(item[0])))
     return result
+
+
+def _cursor_jsonl_files_with_mtime(root: Path, cutoff: float) -> list[tuple[Path, float]]:
+    return _jsonl_files_with_mtime(
+        root,
+        cutoff,
+        max_files=_CURSOR_TRANSCRIPT_SCAN_MAX_FILES,
+        max_dirs=_JSONL_SCAN_MAX_DIRS,
+    )
 
 
 def _ensure_codex_tick_data() -> CodexTickData:
@@ -1206,12 +1256,10 @@ def _cursor_active_session_id(transcripts_dir: Path, cutoff: float) -> str | Non
     best_mtime = cutoff
     best_session_id: str | None = None
     try:
-        for f in transcripts_dir.rglob("*.jsonl"):
-            try:
-                mtime = f.stat().st_mtime
-            except OSError:
-                continue
+        for f, mtime in _cursor_jsonl_files_with_mtime(transcripts_dir, cutoff):
             if mtime <= best_mtime:
+                continue
+            if not jsonl_transcript_recent(f, cutoff, use_payload_timestamp=False):
                 continue
             try:
                 rel_parts = f.relative_to(transcripts_dir).parts

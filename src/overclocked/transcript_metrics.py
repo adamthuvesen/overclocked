@@ -9,6 +9,8 @@ from pathlib import Path
 MAX_LINE_BYTES = 10 * 1024 * 1024
 DEFAULT_TAIL_BYTES = 65536
 DEFAULT_MAX_LINES = 160
+CLAUDE_PROJECT_TRANSCRIPT_LIMIT = 64
+CLAUDE_PROJECT_TRANSCRIPT_WALK_LIMIT = 512
 
 
 @dataclass
@@ -111,40 +113,62 @@ def parse_claude_jsonl_tail(
     return best
 
 
+def claude_project_transcript_candidates(
+    proj: Path,
+    *,
+    limit: int = CLAUDE_PROJECT_TRANSCRIPT_LIMIT,
+) -> list[Path]:
+    """Return bounded parent transcript candidates for a Claude project dir, newest first."""
+    scored: dict[Path, float] = {}
+    walked = 0
+
+    def consider(path: Path) -> None:
+        if "subagents" in path.parts:
+            return
+        try:
+            if not path.is_file():
+                return
+            scored[path] = path.stat().st_mtime
+        except OSError:
+            return
+
+    consider(proj / "conversation.jsonl")
+    try:
+        for path in proj.glob("*.jsonl"):
+            walked += 1
+            if walked > CLAUDE_PROJECT_TRANSCRIPT_WALK_LIMIT:
+                break
+            consider(path)
+    except OSError:
+        pass
+    if walked <= CLAUDE_PROJECT_TRANSCRIPT_WALK_LIMIT:
+        try:
+            for path in proj.rglob("agent-*.jsonl"):
+                walked += 1
+                if walked > CLAUDE_PROJECT_TRANSCRIPT_WALK_LIMIT:
+                    break
+                consider(path)
+        except OSError:
+            pass
+    return [
+        path
+        for path, _mtime in sorted(
+            scored.items(),
+            key=lambda item: (-item[1], str(item[0])),
+        )[:limit]
+    ]
+
+
 def parse_claude_project_dir(proj: Path) -> UsageSnapshot:
     """Usage snapshot from the most recently modified transcript (active thread).
 
     Previously we merged by highest token total, which let stale ``agent-*.jsonl``
     rows dominate over a freshly started ``conversation.jsonl``.
     """
-    candidates: list[Path] = []
-    conv = proj / "conversation.jsonl"
-    if conv.is_file():
-        candidates.append(conv)
-    try:
-        for p in proj.rglob("agent-*.jsonl"):
-            # Subagent transcripts live at <session>/subagents/agent-*.jsonl and
-            # belong to a Task-tool worker, not the parent's metrics. Excluding
-            # them keeps a stale subagent from dominating the parent's row.
-            if "subagents" in p.parts:
-                continue
-            try:
-                if p.is_file():
-                    candidates.append(p)
-            except OSError:
-                pass
-    except OSError:
-        pass
-    scored: list[tuple[Path, float]] = []
-    for p in candidates:
-        try:
-            scored.append((p, p.stat().st_mtime))
-        except OSError:
-            continue
-    if not scored:
+    candidates = claude_project_transcript_candidates(proj)
+    if not candidates:
         return UsageSnapshot()
-    scored.sort(key=lambda item: -item[1])
-    return parse_claude_jsonl_tail(scored[0][0])
+    return parse_claude_jsonl_tail(candidates[0])
 
 
 def parse_codex_rollout_tail(
