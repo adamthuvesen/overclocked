@@ -2,7 +2,6 @@
 
 A macOS SwiftBar widget that counts active AI coding sessions across Claude Code,
 Cursor, and Codex, with a small dropdown for project names and today's local history.
-Useful when the agent stack starts getting a little too spicy.
 
 The menu bar count includes every detected session. Dropdown rows are compact by
 default, and can optionally show model/context hints where the underlying tool
