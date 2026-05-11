@@ -47,6 +47,21 @@ Restart SwiftBar. You should see `👾  0` in the menu bar when no sessions are 
 The plugin runs `overclocked --stream`, keeps a long-lived process open, and emits
 SwiftBar stream separators between updates. The default stream interval is 5 seconds.
 
+## Raycast / Native Menu Bar App
+
+Raycast launches macOS `.app` bundles, not SwiftBar plugin scripts. To make
+Overclocked show up as a normal Raycast application result with its own icon, build
+and install the native menu bar wrapper:
+
+```bash
+scripts/build-menubar-app.sh
+```
+
+This installs `~/Applications/Overclocked.app`. Opening it from Raycast starts a
+background menu bar app; it does not open a window or Dock item. The wrapper runs
+`overclocked --once` every 5 seconds and writes launch/debug details to
+`~/.overclocked/native-menubar.log`.
+
 ## Configuration
 
 Runtime files live in `~/.overclocked/` by default:
@@ -121,3 +136,4 @@ The code is organized around a few small modules:
 - `src/overclocked/aggregates.py`: today's peak/average/sparkline queries.
 - `src/overclocked/config.py`: TOML config and path redaction.
 - `scripts/overclocked.py`: SwiftBar streamable plugin wrapper.
+- `scripts/build-menubar-app.sh`: native Raycast-launchable menu bar app builder.
