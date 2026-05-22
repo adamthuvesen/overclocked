@@ -87,6 +87,22 @@ def test_cli_dump_state_includes_session_metrics(monkeypatch, capsys):
     assert '"cache_read": 100' in out
 
 
+def test_cli_rejects_non_positive_stream_interval(capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        main(["--stream", "--interval", "0"])
+
+    assert excinfo.value.code == 2
+    assert "must be a finite number greater than 0" in capsys.readouterr().err
+
+
+def test_cli_rejects_non_finite_stream_interval(capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        main(["--stream", "--interval", "nan"])
+
+    assert excinfo.value.code == 2
+    assert "must be a finite number greater than 0" in capsys.readouterr().err
+
+
 # ─── --stream mode ──────────────────────────────────────────────────────────
 
 
@@ -141,7 +157,7 @@ def test_stream_emits_separator_between_renders(monkeypatch, capsys):
 
     captured = _install_stream_harness(monkeypatch, render, stop_after_renders=3)
 
-    main(["--stream", "--interval", "0"])
+    main(["--stream", "--interval", "0.001"])
 
     out = capsys.readouterr().out
     assert out.count("~~~") == 3
@@ -158,7 +174,7 @@ def test_stream_survives_render_exception(monkeypatch, capsys):
 
     _install_stream_harness(monkeypatch, render, stop_after_renders=3)
 
-    main(["--stream", "--interval", "0"])
+    main(["--stream", "--interval", "0.001"])
 
     out = capsys.readouterr().out
     assert "👾 1" in out
@@ -180,7 +196,7 @@ def test_stream_persists_last_keys_on_shutdown(monkeypatch, capsys):
         lambda keys: saved.update(keys=keys),
     )
 
-    main(["--stream", "--interval", "0"])
+    main(["--stream", "--interval", "0.001"])
 
     capsys.readouterr()
     assert saved["keys"] == frozenset({("codex", 2)})
@@ -219,7 +235,7 @@ def test_stream_exits_when_stdout_is_not_writable(monkeypatch):
 
     monkeypatch.setattr("overclocked.cli.sys.stdout", FakeStdout())
 
-    main(["--stream", "--interval", "0"])
+    main(["--stream", "--interval", "0.001"])
 
     assert renders["count"] == 0
     assert saved["keys"] == frozenset({("claude", 7)})
@@ -255,6 +271,6 @@ def test_stream_exits_cleanly_on_broken_pipe(monkeypatch):
 
     monkeypatch.setattr("overclocked.cli.sys.stdout", FakeStdout())
 
-    main(["--stream", "--interval", "0"])
+    main(["--stream", "--interval", "0.001"])
 
     assert saved["keys"] == frozenset({("claude", 1)})

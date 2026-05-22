@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import math
 import os
 import select
 import signal
@@ -94,6 +95,16 @@ def _log_exception(exc: BaseException) -> None:
             f.write(f"[{ts}] {type(exc).__name__}: {first_line}\n{tb}\n")
     except OSError:
         pass
+
+
+def _positive_float(value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a number") from exc
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError("must be a finite number greater than 0")
+    return parsed
 
 
 def _run_once(config: Config) -> None:
@@ -225,7 +236,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "--interval",
-        type=float,
+        type=_positive_float,
         default=5.0,
         help="Seconds between ticks in --stream mode (default: 5)",
     )

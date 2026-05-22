@@ -27,8 +27,8 @@ uv pip install -e ".[dev]"
 ```
 
 This installs the `overclocked` CLI from `overclocked.cli:main`. The package has no
-runtime Python dependencies beyond the standard library; dev extras install `pytest`,
-`pytest-cov`, and `ruff`.
+runtime Python dependencies beyond the standard library; dev extras install `pytest`
+and `ruff`.
 
 ## SwiftBar
 
@@ -96,7 +96,7 @@ under the runtime home.
 ```bash
 overclocked                         # one SwiftBar render, with guarded error output
 overclocked --once                  # same one-shot render path
-overclocked --stream --interval 5   # foreground SwiftBar stream loop
+overclocked --stream --interval 5   # foreground SwiftBar stream loop; interval must be finite and > 0
 overclocked --dump-state            # raw one-tick detector sample as JSON
 overclocked --dump-state-stable     # debounced/menu-stable session list as JSON
 overclocked --prune                 # prune and downsample old history
