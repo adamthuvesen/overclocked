@@ -89,12 +89,22 @@ def test_sparkline_multiple_hours(db):
     _insert(db, midnight + 100, 2)  # hour 0
     _insert(db, midnight + 3700, 4)  # hour 1
     _insert(db, midnight + 7300, 1)  # hour 2
-    result = TodayHistoryContext.load(db).today_sparkline()
+    result = TodayHistoryContext.load(db, now_ts=midnight + 7300).today_sparkline()
     # Length includes all elapsed hours through current hour
     assert len(result) >= 3
     assert result[0] == 2
     assert result[1] == 4
     assert result[2] == 1
+
+
+def test_sparkline_ignores_future_snapshots(db):
+    midnight = _midnight_ts()
+    _insert(db, midnight + 100, 2)
+    _insert(db, midnight + 3700, 9)
+
+    result = TodayHistoryContext.load(db, now_ts=midnight + 300).today_sparkline()
+
+    assert result == [2]
 
 
 def test_sparkline_extends_to_current_hour(db):

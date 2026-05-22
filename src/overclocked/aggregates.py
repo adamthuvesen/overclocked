@@ -8,9 +8,13 @@ from dataclasses import dataclass
 from datetime import datetime
 
 
-def _midnight_ts() -> int:
+def _midnight_ts(now_ts: int | None = None) -> int:
     """Unix timestamp for local midnight of today (DST-safe via astimezone)."""
-    now = datetime.now().astimezone()
+    now = (
+        datetime.now().astimezone()
+        if now_ts is None
+        else datetime.fromtimestamp(now_ts).astimezone()
+    )
     midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
     return int(midnight.timestamp())
 
@@ -24,11 +28,11 @@ class TodayHistoryContext:
     rows: list[tuple[int, int]]
 
     @classmethod
-    def load(cls, conn: sqlite3.Connection) -> TodayHistoryContext:
+    def load(cls, conn: sqlite3.Connection, *, now_ts: int | None = None) -> TodayHistoryContext:
         from overclocked.copy import _SUSTAINED_DURATION_S
 
-        midnight = _midnight_ts()
-        now = int(time.time())
+        now = int(time.time()) if now_ts is None else now_ts
+        midnight = _midnight_ts(now)
         ts_min = min(midnight, now - _SUSTAINED_DURATION_S)
         cur = conn.execute(
             "SELECT ts, active FROM snapshots WHERE ts >= ? AND ts <= ? ORDER BY ts",
