@@ -13,5 +13,5 @@ def runtime_home() -> Path:
     """Return the runtime home, honoring the OVERCLOCKED_HOME env override."""
     override = os.environ.get(_HOME_ENV)
     if override:
-        return Path(override)
+        return Path(override).expanduser()
     return Path.home() / _HOME_DIR

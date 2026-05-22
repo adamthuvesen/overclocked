@@ -34,6 +34,15 @@ def test_malformed_toml_returns_defaults_with_warning(tmp_path, monkeypatch, cap
     assert "warning" in captured.err.lower()
 
 
+def test_unreadable_config_path_returns_defaults_with_warning(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("OVERCLOCKED_HOME", str(tmp_path))
+    (tmp_path / "config.toml").mkdir()
+    cfg = load_config()
+    assert cfg.redact_paths == ["~/clients/"]
+    captured = capsys.readouterr()
+    assert "warning" in captured.err.lower()
+
+
 def test_redact_paths_bare_string_returns_defaults(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("OVERCLOCKED_HOME", str(tmp_path))
     (tmp_path / "config.toml").write_text('[privacy]\nredact_paths = "~/clients/"\n')
@@ -50,6 +59,20 @@ def test_redact_paths_list_of_ints_returns_defaults(tmp_path, monkeypatch, capsy
     assert cfg.redact_paths == ["~/clients/"]
     captured = capsys.readouterr()
     assert "warning" in captured.err.lower()
+
+
+def test_invalid_redact_paths_keeps_valid_display_settings(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("OVERCLOCKED_HOME", str(tmp_path))
+    (tmp_path / "config.toml").write_text(
+        "[privacy]\nredact_paths = [1, 2, 3]\n"
+        "[display]\nsession_status = true\nshow_subagents = false\n",
+    )
+    cfg = load_config()
+
+    assert cfg.redact_paths == ["~/clients/"]
+    assert cfg.session_status is True
+    assert cfg.show_subagents is False
+    assert "redact_paths" in capsys.readouterr().err
 
 
 def test_privacy_section_wrong_type_warns_and_uses_privacy_defaults(
@@ -116,6 +139,12 @@ def test_is_redacted_does_not_match_partial_path_segment():
 def test_is_redacted_matches_exact_redaction_root():
     cfg = Config(redact_paths=["~/clients/"])
     assert cfg.is_redacted(str(Path.home() / "clients"))
+
+
+def test_is_redacted_root_matches_all_paths():
+    cfg = Config(redact_paths=["/"])
+    assert cfg.is_redacted("/Users/me/project")
+    assert cfg.is_redacted("relative/project")
 
 
 def test_session_metrics_false(tmp_path, monkeypatch):

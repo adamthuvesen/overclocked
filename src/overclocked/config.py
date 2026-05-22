@@ -7,6 +7,8 @@ from pathlib import Path
 
 from overclocked.runtime_home import runtime_home
 
+_DEFAULT_REDACT_PATHS = ["~/clients/"]
+
 
 def _warn(config_path: Path, message: str) -> None:
     print(f"overclocked: warning: {config_path}: {message}", file=sys.stderr)
@@ -20,9 +22,19 @@ def _table_section(data: dict, name: str, config_path: Path) -> dict:
     return {}
 
 
+def _bool_setting(data: dict, name: str, default: bool, config_path: Path) -> bool:
+    if name not in data:
+        return default
+    value = data.get(name)
+    if isinstance(value, bool):
+        return value
+    _warn(config_path, f"{name} must be bool; using default {str(default).lower()}")
+    return default
+
+
 @dataclass
 class Config:
-    redact_paths: list[str] = field(default_factory=lambda: ["~/clients/"])
+    redact_paths: list[str] = field(default_factory=lambda: list(_DEFAULT_REDACT_PATHS))
     session_status: bool = False
     session_metrics: bool = False
     show_subagents: bool = True
@@ -41,7 +53,7 @@ class Config:
         result = []
         for p in self.redact_paths:
             expanded = Path(p).expanduser().as_posix().rstrip("/")
-            result.append(expanded)
+            result.append(expanded or "/")
         return result
 
 
@@ -52,39 +64,21 @@ def load_config() -> Config:
     try:
         with config_path.open("rb") as fh:
             data = tomllib.load(fh)
+    except OSError as exc:
+        _warn(config_path, str(exc))
+        return Config()
     except tomllib.TOMLDecodeError as exc:
         _warn(config_path, str(exc))
         return Config()
     privacy = _table_section(data, "privacy", config_path)
-    redact_paths = privacy.get("redact_paths", ["~/clients/"])
+    redact_paths = privacy.get("redact_paths", _DEFAULT_REDACT_PATHS)
     if not isinstance(redact_paths, list) or not all(isinstance(p, str) for p in redact_paths):
         _warn(config_path, "redact_paths must be list[str]; using defaults")
-        return Config()
+        redact_paths = _DEFAULT_REDACT_PATHS
     display = _table_section(data, "display", config_path)
-    session_status = False
-    if "session_status" in display:
-        raw_ss = display.get("session_status")
-        if isinstance(raw_ss, bool):
-            session_status = raw_ss
-        else:
-            _warn(config_path, "session_status must be bool; using default false")
-    session_metrics = False
-    if "session_metrics" in display:
-        raw_sm = display.get("session_metrics")
-        if isinstance(raw_sm, bool):
-            session_metrics = raw_sm
-        else:
-            _warn(config_path, "session_metrics must be bool; using default false")
-    show_subagents = True
-    if "show_subagents" in display:
-        raw_ss2 = display.get("show_subagents")
-        if isinstance(raw_ss2, bool):
-            show_subagents = raw_ss2
-        else:
-            _warn(config_path, "show_subagents must be bool; using default true")
     return Config(
-        redact_paths=redact_paths,
-        session_status=session_status,
-        session_metrics=session_metrics,
-        show_subagents=show_subagents,
+        redact_paths=list(redact_paths),
+        session_status=_bool_setting(display, "session_status", False, config_path),
+        session_metrics=_bool_setting(display, "session_metrics", False, config_path),
+        show_subagents=_bool_setting(display, "show_subagents", True, config_path),
     )
