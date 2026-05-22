@@ -528,7 +528,8 @@ def _claude_project_dir_for_cwd(cwd: str) -> Path | None:
     The simpler ``/``-only encoding is kept as a fallback for paths without
     ``.``/``_`` to stay forward-compatible with any older layout on disk.
     """
-    if not _CLAUDE_PROJECTS_DIR.exists():
+    projects_dir = _claude_projects_dir()
+    if not projects_dir.exists():
         return None
     tail = cwd.rstrip("/")
     if not tail:
@@ -536,9 +537,9 @@ def _claude_project_dir_for_cwd(cwd: str) -> Path | None:
     full = _encode_cwd_for_claude_projects(tail)
     slug = tail.lstrip("/").replace("/", "-")
     candidates = (
-        _CLAUDE_PROJECTS_DIR / full,
-        _CLAUDE_PROJECTS_DIR / f"-{slug}",
-        _CLAUDE_PROJECTS_DIR / slug,
+        projects_dir / full,
+        projects_dir / f"-{slug}",
+        projects_dir / slug,
     )
     for p in candidates:
         if p.is_dir():
@@ -552,6 +553,13 @@ def _claude_config_base() -> Path:
     if override:
         return Path(override).expanduser()
     return Path.home() / ".claude"
+
+
+def _claude_projects_dir() -> Path:
+    """Claude projects dir, honoring CLAUDE_CONFIG_DIR while keeping tests patchable."""
+    if os.environ.get("CLAUDE_CONFIG_DIR"):
+        return _claude_config_base() / "projects"
+    return _CLAUDE_PROJECTS_DIR
 
 
 def _encode_cwd_for_claude_projects(cwd: str) -> str:
@@ -1081,11 +1089,12 @@ def _list_live_subagents_for_parent(parent: Session) -> list[Session]:
 
 def list_claude_app_sessions() -> list[Session]:
     """Detect active Claude desktop sessions via recent session files."""
-    if not _CLAUDE_PROJECTS_DIR.exists():
+    projects_dir = _claude_projects_dir()
+    if not projects_dir.exists():
         return []
     cutoff = time.time() - _ACTIVITY_WINDOW_SEC
     candidates = sorted(
-        _jsonl_files_with_mtime(_CLAUDE_PROJECTS_DIR, cutoff),
+        _jsonl_files_with_mtime(projects_dir, cutoff),
         key=lambda x: x[1],
         reverse=True,
     )

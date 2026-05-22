@@ -970,6 +970,19 @@ def test_list_claude_app_sessions_detects_recent_desktop_file(tmp_path, monkeypa
     assert sessions[0].tool == "claude"
 
 
+def test_list_claude_app_sessions_honors_claude_config_dir(tmp_path, monkeypatch):
+    config_root = tmp_path / "custom-claude"
+    f = config_root / "projects" / "-Users-me-dev-proj" / "session-1.jsonl"
+    _make_claude_session(f, "/Users/me/dev/proj")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_root))
+    monkeypatch.setattr("overclocked.detectors._CLAUDE_PROJECTS_DIR", tmp_path / "default-projects")
+
+    sessions = list_claude_app_sessions()
+
+    assert len(sessions) == 1
+    assert sessions[0].transcript_path == f
+
+
 def test_list_claude_app_sessions_ignores_cli_file(tmp_path, monkeypatch):
     f = tmp_path / "-Users-me" / "cli-session.jsonl"
     _make_claude_session(f, "/Users/me", entrypoint="cli")

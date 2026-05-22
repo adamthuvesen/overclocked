@@ -18,10 +18,11 @@ def isolate_overclocked_home(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def reset_detector_module_caches():
+def reset_detector_module_caches(monkeypatch):
     """Detector tests call list_* without tick(); clear tick-scoped module state."""
     import overclocked.detectors as detectors
 
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     detectors._codex_tick_data = None
     detectors._ps_table = None
     detectors._cwd_cache.clear()
