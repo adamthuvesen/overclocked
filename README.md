@@ -123,9 +123,11 @@ To run pruning daily via cron:
 ## Development
 
 ```bash
-ruff check .
-ruff format . --check
-pytest -q
+uv sync --extra dev
+uv run pre-commit install
+uv run ruff check src tests
+uv run ruff format --check src tests
+uv run pytest -q
 ```
 
 The code is organized around a few small modules:
