@@ -31,6 +31,33 @@ uv pip install -e ".[dev]"
 This installs the `overclocked` CLI. The package has no runtime dependencies beyond the
 standard library; dev extras are `pytest` and `ruff`.
 
+## Demo
+
+Run a no-secret demo. It does not scan local sessions or write history.
+
+```bash
+overclocked --demo
+```
+
+Representative output:
+
+```text
+👾  3
+---
+Claude Code | color=#6F5543 size=13 sfimage=terminal
+  api | color=#E8730A size=12 trim=false
+Cursor | color=#6F5543 size=13 sfimage=cursorarrow.rays
+  docs | color=#E8730A size=12 trim=false
+Codex | color=#6F5543 size=13 sfimage=cube
+  app | color=#E8730A size=12 trim=false
+---
+three. getting jazzy. | font=Georgia-Italic color=#B59F90 size=12
+---
+No history yet | color=#9D887A
+```
+
+Public claim: `overclocked --demo` always shows 3 active demo sessions.
+
 ## SwiftBar
 
 Install [SwiftBar](https://github.com/swiftbar/SwiftBar), then symlink the plugin:
@@ -90,6 +117,7 @@ overclocked --once                  # same one-shot render
 overclocked --stream --interval 5   # foreground stream loop (interval > 0)
 overclocked --dump-state            # raw one-tick detector sample as JSON
 overclocked --dump-state-stable     # debounced, menu-stable session list as JSON
+overclocked --demo                  # deterministic no-secret sample menu
 overclocked --prune                 # prune and downsample old history
 ```
 

@@ -55,6 +55,15 @@ def _build_state_dict(sessions):
     return {"sessions": rows, "active": len(sessions)}
 
 
+def _demo_sessions() -> list[Session]:
+    """Return a deterministic no-secret sample for README demos."""
+    return [
+        Session(tool="claude", pid=101, cwd="/demo/api", project="api"),
+        Session(tool="cursor_editor", pid=202, cwd="/demo/docs", project="docs"),
+        Session(tool="codex", pid=303, cwd="/demo/app", project="app"),
+    ]
+
+
 def _render_once(
     config: Config,
     conn: sqlite3.Connection,
@@ -254,6 +263,11 @@ def main(argv: list[str] | None = None) -> None:
         help=("Print debounced session list (same stability as the menubar) as JSON and exit"),
     )
     parser.add_argument(
+        "--demo",
+        action="store_true",
+        help="Print a deterministic no-secret sample menu and exit",
+    )
+    parser.add_argument(
         "--prune",
         action="store_true",
         help="Prune old history from the database and exit",
@@ -261,6 +275,10 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     # --prune and --dump-state bypass the exception guard so tracebacks surface.
+    if args.demo:
+        print(dropdown(RenderState(sessions=_demo_sessions(), config=Config())))
+        return
+
     if args.prune:
         with contextlib.closing(connect()) as conn:
             prune(conn)

@@ -87,6 +87,26 @@ def test_cli_dump_state_includes_session_metrics(monkeypatch, capsys):
     assert '"cache_read": 100' in out
 
 
+def test_cli_demo_is_deterministic_and_skips_local_detection(monkeypatch, capsys):
+    def should_not_detect(config):  # noqa: ARG001
+        raise AssertionError("demo should not inspect local sessions")
+
+    def should_not_connect():
+        raise AssertionError("demo should not write runtime history")
+
+    monkeypatch.setattr("overclocked.cli.tick", should_not_detect)
+    monkeypatch.setattr("overclocked.cli.connect", should_not_connect)
+
+    main(["--demo"])
+
+    out = capsys.readouterr().out
+    assert "👾  3" in out
+    assert "Claude Code" in out
+    assert "Cursor" in out
+    assert "Codex" in out
+    assert "/demo/" not in out
+
+
 def test_cli_rejects_non_positive_stream_interval(capsys):
     with pytest.raises(SystemExit) as excinfo:
         main(["--stream", "--interval", "0"])
